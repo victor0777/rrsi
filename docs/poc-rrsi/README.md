@@ -22,6 +22,7 @@ ai_papers harness stack — without modifying any existing runtime.
 | [05-HARNESS2-COMPARISON.md](05-HARNESS2-COMPARISON.md) | Mechanism comparison with Harness²; no duplication; reusable common interface |
 | [06-LIMITATIONS.md](06-LIMITATIONS.md) | Limitations and bounded follow-up plan |
 | [07-RESEARCH-AGENT-AI-PAPERS-PROPOSALS.md](07-RESEARCH-AGENT-AI-PAPERS-PROPOSALS.md) | Review of research_agent / ai_papers harness surfaces and assets; three integration proposals (audit-first → reader harness → review triage) |
+| [08-INTEGRATION-PROPOSALS.md](08-INTEGRATION-PROPOSALS.md) | KB edition: review detail, sequencing rationale, cost estimates, decision points |
 
 ## PoC quickstart
 
