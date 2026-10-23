@@ -23,6 +23,7 @@ ai_papers harness stack — without modifying any existing runtime.
 | [06-LIMITATIONS.md](06-LIMITATIONS.md) | Limitations and bounded follow-up plan |
 | [07-RESEARCH-AGENT-AI-PAPERS-PROPOSALS.md](07-RESEARCH-AGENT-AI-PAPERS-PROPOSALS.md) | Review of research_agent / ai_papers harness surfaces and assets; three integration proposals (audit-first → reader harness → review triage) |
 | [08-INTEGRATION-PROPOSALS.md](08-INTEGRATION-PROPOSALS.md) | KB edition: review detail, sequencing rationale, cost estimates, decision points |
+| [09-INTEGRATION-DESIGN-R1.md](09-INTEGRATION-DESIGN-R1.md) | **R1 design**: purpose redefinition with paper-direct vs project-added mapping, five optimization units (R1 = U1 Reader Prompt only), Evolve/Validation/Holdout split with leakage policy, multi-objective reader rewards + gold-validity check, 3-level E2E promotion, execution & safety contracts (state machine, gates, cost, holdout exhaustion, approval/rollback), RA composite reward |
 
 ## PoC quickstart
 
