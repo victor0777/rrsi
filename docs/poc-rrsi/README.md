@@ -21,6 +21,7 @@ ai_papers harness stack — without modifying any existing runtime.
 | [04-POC-RESULTS.md](04-POC-RESULTS.md) | Model-free fixture PoC: implementation, per-round outcomes, completion-criteria checklist, honest notes |
 | [05-HARNESS2-COMPARISON.md](05-HARNESS2-COMPARISON.md) | Mechanism comparison with Harness²; no duplication; reusable common interface |
 | [06-LIMITATIONS.md](06-LIMITATIONS.md) | Limitations and bounded follow-up plan |
+| [07-RESEARCH-AGENT-AI-PAPERS-PROPOSALS.md](07-RESEARCH-AGENT-AI-PAPERS-PROPOSALS.md) | Review of research_agent / ai_papers harness surfaces and assets; three integration proposals (audit-first → reader harness → review triage) |
 
 ## PoC quickstart
 
