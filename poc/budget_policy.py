@@ -97,6 +97,19 @@ def assert_concurrency(running: int) -> None:
 
 # ------------------------------------------- GPU-hours vs wall-clock separation --
 
+# R0-b2 policy supplement (directive item 3): on a shared vLLM server,
+# per-trial accelerator occupancy cannot be isolated. Two distinct fields:
+#   - gpu_hours_upper_bound: wall-clock x 1 GPU attribution (an upper bound,
+#     never reported as a measured value);
+#   - gpu_hours_measured: from per-GPU accounting, when a binding provides it
+#     (None on the shared server).
+# GPU-hours is metering/reporting only. Run blocking is centered on
+# wall-clock and model calls; a separate GPU-hours upper-bound cap is kept
+# independently (fail-closed) and never conflated with the measured value.
+GPU_HOURS_FIELDS = {"gpu_hours_upper_bound": "upper_bound_attribution",
+                    "gpu_hours_measured": "measured_per_gpu_accounting"}
+
+
 def gpu_hours_sum(per_gpu_seconds: list[float]) -> float:
     """GPU-hours summed across GPUs (multi-GPU runs add, not max).
 
