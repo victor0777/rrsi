@@ -1,0 +1,120 @@
+{
+ "schema": "rrsi-gold-review-packet-index-r4/v0.1",
+ "revision_of": "commit 16a1c14 (docs/poc-rrsi/review-packets/) — 기존 패킷 무변경·보존",
+ "r1_verdict_summary": {
+  "APPROVE": 0,
+  "NEEDS_REVISION": 5,
+  "REJECT": 3,
+  "note": "외부 AI 검토 의견 — 시스템의 최종 인간 승인으로 자동 간주하지 않음"
+ },
+ "digest_field_definitions": {
+  "gold_bundle_digest": "3ce9c206f4a83008cf5bd9994be64cc952981ea3ea74c16b5ffca073daf25523 — 9 fixtures 공통(단일 등록 파일 digest)",
+  "reader_note_digest": {
+   "1802.07862": "99efc53f0df17bc50f4a53f0f0cf5cea63a00e6f71b2cae2b7100a61b02d9bfa",
+   "1901.10133": "97f5dd09a78bfb3db941999b4dc977319a2ffe25b8c5781970396f44b1122410"
+  },
+  "capture_digest": {
+   "1802.07862": "9741540db1f1212fd132d7dd1b11d182a10be79732208598cf52c7c8aee004d0",
+   "1901.10133": "652151f6b22c2a972b206c7f1ba67639c0f095e5767d976b527602cbe9ac2c1a"
+  }
+ },
+ "binding_fixes": [
+  {
+   "fixture": "g2-1802-method",
+   "was": "p5-1901-method-removed (1901)",
+   "fixed": "UNAVAILABLE (1802 P5 부재)"
+  },
+  {
+   "fixture": "g6-1901-claim",
+   "was": "p1-1802-claim-removed (1802)",
+   "fixed": "UNAVAILABLE (1901 P1 부재)"
+  },
+  {
+   "fixture": "g9-1901-evidence",
+   "was": "p3ext-1802-unrelated-ref (1802)",
+   "fixed": "UNAVAILABLE (1901 P3 부재)"
+  }
+ ],
+ "bindings": [
+  {
+   "fixture": "g1-1802-claim",
+   "paper": "1802.07862",
+   "perturbations": [
+    "r2/p1-1802-claim-removed (P1)",
+    "r2/p4-1802-contradiction (P4)"
+   ],
+   "identity_match": true
+  },
+  {
+   "fixture": "g2-1802-method",
+   "paper": "1802.07862",
+   "perturbations": [],
+   "status": "UNAVAILABLE",
+   "identity_match": true
+  },
+  {
+   "fixture": "g3-1802-result",
+   "paper": "1802.07862",
+   "perturbations": [
+    "r1/p2-1802-vocab (P2, 15,733→15,800)"
+   ],
+   "identity_match": true
+  },
+  {
+   "fixture": "g4-1802-numeric",
+   "paper": "1802.07862",
+   "perturbations": [
+    "r1/p2-1802-size (P2, 10,000→12,000)"
+   ],
+   "identity_match": true
+  },
+  {
+   "fixture": "g5-1802-evidence",
+   "paper": "1802.07862",
+   "status": "EXCLUDED (Evidence Absence, r3 확정 유지)"
+  },
+  {
+   "fixture": "g6-1901-claim",
+   "paper": "1901.10133",
+   "perturbations": [],
+   "status": "UNAVAILABLE",
+   "identity_match": true
+  },
+  {
+   "fixture": "g7-1901-method",
+   "paper": "1901.10133",
+   "perturbations": [
+    "r2/p5-1901-method-removed (P5)"
+   ],
+   "identity_match": true
+  },
+  {
+   "fixture": "g8-1901-result",
+   "paper": "1901.10133",
+   "perturbations": [
+    "r2/p2ext-1901-other-metric (P2확장, 0.25→0.75)",
+    "r1/p2-1901-theta (P2, 0.25→0.40)"
+   ],
+   "identity_match": true
+  },
+  {
+   "fixture": "g9-1901-evidence",
+   "paper": "1901.10133",
+   "perturbations": [],
+   "status": "UNAVAILABLE",
+   "identity_match": true
+  }
+ ],
+ "remediation_needed": "UNAVAILABLE 3건(g2·g6·g9)에 대한 논문 일치 semantic 변형 신규 생성은 별도 지시 필요",
+ "approval_gate": "poc/gold_review.py — author-path 승인 구조적 거부, APPROVED는 5조건 전부 + 독립자 signed record",
+ "packet_digests": {
+  "packet-r4-g1-1802-claim.md": "3c2a6bcaebafd2daaed05ac28ba5e686318e8478327bc864549bbe6c0c388e08",
+  "packet-r4-g2-1802-method.md": "b24a1ac8e10e2805b678229d32fb49152f67280ca60f78485e2bcf603f7b37a1",
+  "packet-r4-g3-1802-result.md": "042e496a314233afa22a4ea23a51e413f7c140850a10eb06249fbd77ba048059",
+  "packet-r4-g4-1802-numeric.md": "0a61aa751f501fabb76960d5923cea449c66ece86d145ac55818aa75876c3dcc",
+  "packet-r4-g6-1901-claim.md": "d904cd387ee1eb4d8acd52854d635030287ceb8c61ef74928a2b8259f02a2298",
+  "packet-r4-g7-1901-method.md": "7ba8cada9988d7aab60fe0e0b86e664ca5a4c1833ba412e1c0a9b324889cd5bb",
+  "packet-r4-g8-1901-result.md": "7d3fdde9fc32b828d7043be438c3a2db98ec6533db1a2df193a2684632928298",
+  "packet-r4-g9-1901-evidence.md": "992093765b2e6417d5e5939e623c1424340a4d5687002188e4c71e356687b11a"
+ }
+}
