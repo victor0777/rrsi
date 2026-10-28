@@ -107,3 +107,42 @@ def test_seal_run_dir(tmp_path):
     assert seal["artifact_digests"]["run-summary.json"] == \
         hashlib.sha256((d / "run-summary.json").read_bytes()).hexdigest()
     assert verify_seal(d) is True
+
+
+# ---- minimal hardening (directive §E) ----
+
+# atomic exclusive creation: second creator fails, no dir is overwritten
+def test_atomic_creation_exclusive(tmp_path):
+    from poc.run_dir_isolation import create_run_dir_atomic
+    d = create_run_dir_atomic("inv-a", tmp_path)
+    assert d.is_dir()
+    with pytest.raises(RunDirCollisionBlocked) as e:
+        create_run_dir_atomic("inv-a", tmp_path)
+    assert "RUN_DIR_ALREADY_USED" in e.value.code
+
+
+# symlink bypass: a symlinked run-dir path is refused
+def test_symlink_bypass_block(tmp_path):
+    target = tmp_path / "real-run"
+    target.mkdir()
+    (target / "artifact.json").write_text("{}")
+    link = tmp_path / "inv-a"
+    link.symlink_to(target)
+    with pytest.raises(RunDirCollisionBlocked) as e:
+        resolve_run_dir("inv-a", tmp_path)
+    assert "SYMLINK_PATH_REFUSED" in e.value.code
+
+
+# symlink inside a tree refuses sealing (sealed digest anchoring is intact)
+def test_symlink_in_seal_block(tmp_path):
+    target = tmp_path / "outside"
+    target.mkdir()
+    (target / "f.json").write_text("{}")
+    d = run_dir_for("inv-a", tmp_path)
+    d.mkdir()
+    (d / "artifact.json").write_text("{}")
+    (d / "evil.json").symlink_to(target / "f.json")
+    from poc.run_dir_isolation import seal_run_dir
+    with pytest.raises(RunDirCollisionBlocked) as e:
+        seal_run_dir(d)
+    assert "SYMLINK_IN_SEALED_TREE" in e.value.code

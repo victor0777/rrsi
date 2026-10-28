@@ -45,7 +45,27 @@ class RunDirCollisionBlocked(Exception):
 def run_dir_for(invocation_id: str, root: Path) -> Path:
     if not invocation_id or "/" in invocation_id or invocation_id in (".", ".."):
         raise RunDirCollisionBlocked("INVOCATION_ID_INVALID", invocation_id)
-    return Path(root) / invocation_id
+    root = Path(root)
+    if root.exists() and not root.is_dir():
+        raise RunDirCollisionBlocked("RUN_ROOT_NOT_DIRECTORY", str(root))
+    # no path component of the run dir may be a symlink (symlink bypass refused)
+    if root.exists() and root.is_symlink():
+        raise RunDirCollisionBlocked("SYMLINK_PATH_REFUSED", str(root))
+    run_dir = root / invocation_id
+    if run_dir.exists() and run_dir.is_symlink():
+        raise RunDirCollisionBlocked("SYMLINK_PATH_REFUSED", str(run_dir))
+    return run_dir
+
+
+def create_run_dir_atomic(invocation_id: str, root: Path) -> Path:
+    """Exclusively create the run dir (atomic mkdir, mode 0o700, symlink-safe)."""
+    run_dir = run_dir_for(invocation_id, root)
+    run_dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        run_dir.mkdir(mode=0o700)  # exclusive: fails if it already exists
+    except FileExistsError:
+        raise RunDirCollisionBlocked("RUN_DIR_ALREADY_USED", str(run_dir))
+    return run_dir
 
 
 def resolve_run_dir(
@@ -84,6 +104,8 @@ def seal_run_dir(run_dir: Path) -> dict:
     digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()  # noqa: E731
     artifacts = {}
     for p in sorted(run_dir.rglob("*")):
+        if p.is_symlink():
+            raise RunDirCollisionBlocked("SYMLINK_IN_SEALED_TREE", str(p))
         if p.is_file() and p.name != "seal-run-dir.json":
             artifacts[str(p.relative_to(run_dir))] = digest(p)
     seal = {"schema": "rrsi-run-dir-seal/v0.1",
