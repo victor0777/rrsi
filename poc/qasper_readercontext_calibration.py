@@ -76,6 +76,77 @@ def reader_note_text() -> str:
     return text
 
 
+def cases_file() -> list:
+    return [json.loads(l) for l in
+            (RUN_DIR.parent / "qasper-calibration/dev-cases-2papers.jsonl").open()
+            if l.strip()]
+
+
+def preflight() -> dict:
+    """Ordered, non-executing execution-path gate (directive §A 1–6).
+
+    Returns {"status": "READY"|"BLOCK", "calls": 0, "reservations": 0, ...}.
+    Never imports or touches the model client. Order is mandatory:
+    permit -> identity -> split/holdout -> model/endpoint -> budget -> ledger.
+    """
+    import os
+    calls = 0
+    reservations = 0
+    checks = []
+    # 1. Execution Permit (includes workstream/call-type/model/endpoint/budget/
+    #    ledger reservation capability — environment alone authorizes nothing).
+    from poc.execution_permit import ExecutionPermitBlocked, assert_authorized
+    try:
+        permit_result = assert_authorized(
+            workstream="reader_context_qa", call_type="qa_inference",
+            dataset_sha256=hashlib.sha256(DATASET.read_bytes()).hexdigest(),
+            paper_ids=[c["source_paper_ref"]["paper_id"] for c in cases_file()],
+            model=APPROVED_MODEL, endpoint="http://192.168.0.199/v1",
+            invocation_id=os.environ.get("AI_PAPERS_PROCESS_TELEMETRY_INVOCATION_ID", ""))
+    except ExecutionPermitBlocked as blocked:
+        return {"status": "BLOCK", "code": blocked.code, "calls": calls,
+                "reservations": reservations}
+    checks.append("EXECUTION_PERMIT")
+    # 2. Paper Identity + 3. Split/Holdout (resolve_binding verifies both,
+    #    fail-closed, per case, against the per-paper note registry).
+    from poc.paper_identity_binding import IdentityBindingBlocked, resolve_binding
+    notes = reader_notes()
+    for case in cases_file():
+        paper_id = case["source_paper_ref"]["paper_id"]
+        binding_note = notes.get(paper_id)
+        if binding_note is None:
+            return {"status": "BLOCK", "code": "READER_NOTE_REGISTRY_ENTRY_ABSENT",
+                    "calls": calls, "reservations": reservations}
+        try:
+            resolve_binding(
+                question_paper_id=paper_id,
+                question_source_version="v0.3",
+                reader_run_dir=binding_note["artifact"].parents[2],
+                note_artifact_path=binding_note["artifact"],
+                expected_note_digest=binding_note["sha256"],
+                expected_note_source_version=binding_note["source_version"],
+                registry_path=READER_NOTE_REGISTRY,
+                split="dev",
+            )
+        except IdentityBindingBlocked as blocked:
+            return {"status": "BLOCK", "code": blocked.code, "calls": calls,
+                    "reservations": reservations}
+    checks.append("PAPER_IDENTITY_AND_SPLIT")
+    # 5. Budget: ceiling env must exist and cover the permitted call count.
+    ceiling = os.environ.get("AI_PAPERS_MODEL_CALL_CEILING")
+    if not ceiling or int(ceiling) < len(cases_file()):
+        return {"status": "BLOCK", "code": "BUDGET_CEILING_INSUFFICIENT",
+                "calls": calls, "reservations": reservations}
+    checks.append("BUDGET")
+    # 4. Model/Endpoint validated inside the permit; 6. ledger reservation
+    # capability probe ran inside the permit (PERMIT_LEDGER).
+    checks.append("MODEL_ENDPOINT")
+    checks.append("LEDGER_RESERVATION_CAPABLE")
+    return {"status": "READY", "calls": calls, "reservations": reservations,
+            "checks": checks,
+            "permit_checks": permit_result["checks"]}
+
+
 def run() -> int:
     import os
     # Fail-closed: model calls must go through the ledger/telemetry bindings.
@@ -88,37 +159,17 @@ def run() -> int:
             print(json.dumps({"status": "FAIL_CLOSED",
                               "reason": "CALL_BUDGET_ENV_ABSENT", "env": env}))
             return 1
-    ds = json.loads(DATASET.read_bytes())
-    cases = [json.loads(l) for l in
-             (RUN_DIR.parent / "qasper-calibration/dev-cases-2papers.jsonl").open()
-             if l.strip()]
-    # Fail-closed Paper Identity Binding (evaluation-integrity amendment):
-    # each case must bind to ITS OWN paper's reader note before any call.
-    from poc.paper_identity_binding import IdentityBindingBlocked, resolve_binding
-    notes = reader_notes()
-    try:
-        for case in cases:
-            paper_id = case["source_paper_ref"]["paper_id"]
-            binding_note = notes.get(paper_id)
-            if binding_note is None:
-                raise IdentityBindingBlocked(
-                    "READER_NOTE_REGISTRY_ENTRY_ABSENT", paper_id)
-            note_path = binding_note["artifact"]
-            resolve_binding(
-                question_paper_id=paper_id,
-                question_source_version="v0.3",  # frozen QASPER fixture snapshot
-                reader_run_dir=note_path.parents[2],
-                note_artifact_path=note_path,
-                expected_note_digest=binding_note["sha256"],
-                expected_note_source_version=binding_note["source_version"],
-                registry_path=READER_NOTE_REGISTRY,
-                split="dev",
-            )
-    except IdentityBindingBlocked as blocked:
+    gate = preflight()
+    if gate["status"] != "READY":
         print(json.dumps({"status": "FAIL_CLOSED",
-                          "reason": "PAPER_IDENTITY_BINDING",
-                          "code": blocked.code}))
+                          "reason": "PREFLIGHT_BLOCKED",
+                          "code": gate["code"], "calls": 0,
+                          "reservations": 0}))
         return 1
+    ds = json.loads(DATASET.read_bytes())
+    cases = cases_file()
+    # Identity/split verified by preflight; raw collection begins.
+    notes = reader_notes()
     raw_dir = RUN_DIR / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     head = ai_papers_head()
@@ -275,8 +326,11 @@ def score() -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("step", choices=["run", "build", "score"])
+    ap.add_argument("step", choices=["preflight", "run", "build", "score"])
     args = ap.parse_args()
+    if args.step == "preflight":
+        print(json.dumps(preflight()))
+        return 0 if preflight()["status"] == "READY" else 1
     return {"run": run, "build": build, "score": score}[args.step]()
 
 

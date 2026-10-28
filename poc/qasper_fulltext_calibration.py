@@ -148,6 +148,34 @@ def parse_response(raw_text: str, *, document_text: str, case_id: str = "") -> d
 
 
 def run() -> int:
+    import os
+    # Fail-closed execution authorization (incident post-condition): a direct
+    # model-call path requires an issued permit + bound ledger/telemetry env
+    # BEFORE any call. An unbound invocation is refused with 0 calls.
+    for env in ("AI_PAPERS_EXECUTION_PERMIT",
+                "AI_PAPERS_MODEL_CALL_BUDGET_LEDGER",
+                "AI_PAPERS_MODEL_CALL_CEILING",
+                "AI_PAPERS_PROCESS_TELEMETRY_EVENTS",
+                "AI_PAPERS_PROCESS_TELEMETRY_INVOCATION_ID"):
+        if not os.environ.get(env):
+            print(json.dumps({"status": "FAIL_CLOSED",
+                              "reason": "EXECUTION_AUTHORIZATION_ABSENT", "env": env}))
+            return 1
+    from poc.execution_permit import ExecutionPermitBlocked, assert_authorized
+    cases = [json.loads(l) for l in
+             (RUN_DIR.parent / "qasper-calibration/dev-cases-2papers.jsonl").open()
+             if l.strip()]
+    try:
+        assert_authorized(
+            workstream="fulltext_qa", call_type="qa_inference",
+            dataset_sha256=hashlib.sha256(DATASET.read_bytes()).hexdigest(),
+            paper_ids=[c["source_paper_ref"]["paper_id"] for c in cases],
+            model=APPROVED_MODEL, endpoint="http://192.168.0.199/v1",
+            invocation_id=os.environ.get("AI_PAPERS_PROCESS_TELEMETRY_INVOCATION_ID", ""))
+    except ExecutionPermitBlocked as blocked:
+        print(json.dumps({"status": "FAIL_CLOSED",
+                          "reason": "EXECUTION_PERMIT", "code": blocked.code}))
+        return 1
     ds = json.loads(DATASET.read_bytes())
     cases = [json.loads(l) for l in
              (RUN_DIR.parent / "qasper-calibration/dev-cases-2papers.jsonl").open()

@@ -38,6 +38,8 @@ from typing import Optional
 
 PERMIT_ENV = "AI_PAPERS_EXECUTION_PERMIT"
 PERMIT_SCHEMA = "rrsi-execution-permit/v0.1"
+ISSUANCE_LEDGER = "execution-permit-issuance.jsonl"
+ISSUED_EVENT = "execution_permit_issued"
 
 KNOWN_WORKSTREAMS = ("reader_note_generation", "reader_context_qa",
                      "fulltext_qa", "abstract_qa", "diagnostic_analysis")
@@ -53,7 +55,54 @@ class ExecutionPermitBlocked(Exception):
         self.detail = detail
 
 
-def load_permit(env_value: Optional[str] = None) -> dict:
+def permit_sha256(path: Path) -> str:
+    import hashlib
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def issuance_ledger_path() -> Path:
+    """Append-only issuance ledger, rooted at the rrsi runs directory."""
+    root = Path(__file__).resolve().parents[1]
+    ledger = root / "poc" / "runs" / ISSUANCE_LEDGER
+    if not ledger.exists():
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text("")
+    return ledger
+
+
+def register_permit(permit_path: Path, *, issued_by: str) -> dict:
+    """Issuer-side registration (NEVER called by a runner). Append-only."""
+    entry = {
+        "event": ISSUED_EVENT,
+        "permit_sha256": permit_sha256(permit_path),
+        "invocation_id": str(json.loads(permit_path.read_text(encoding="utf-8"))
+                             .get("invocation_id") or ""),
+        "issued_by": issued_by,
+        "issued_at": __import__("datetime").datetime.now(
+            __import__("datetime").UTC).replace(microsecond=0)
+            .isoformat().replace("+00:00", "Z"),
+    }
+    with open(issuance_ledger_path(), "a") as f:
+        f.write(json.dumps(entry, sort_keys=True) + "\n")
+    return entry
+
+
+def _assert_issued(permit_path: Path, permit: dict) -> None:
+    """Runner-side check: the exact permit bytes must have been issued."""
+    digest = permit_sha256(permit_path)
+    for line in issuance_ledger_path().open():
+        if not line.strip():
+            continue
+        entry = json.loads(line)
+        if (entry.get("event") == ISSUED_EVENT
+                and entry.get("permit_sha256") == digest
+                and entry.get("invocation_id") == str(permit.get("invocation_id") or "")):
+            return
+    raise ExecutionPermitBlocked("PERMIT_NOT_ISSUED",
+                                 f"sha256={digest[:16]} not in the issuance ledger")
+
+
+def load_permit(env_value: Optional[str] = None) -> tuple:
     value = env_value if env_value is not None else os.environ.get(PERMIT_ENV)
     if not value:
         raise ExecutionPermitBlocked("PERMIT_REQUIRED",
@@ -64,7 +113,8 @@ def load_permit(env_value: Optional[str] = None) -> dict:
     permit = json.loads(path.read_text(encoding="utf-8"))
     if str(permit.get("schema") or "") != PERMIT_SCHEMA:
         raise ExecutionPermitBlocked("PERMIT_SCHEMA_UNKNOWN", str(permit.get("schema")))
-    return permit
+    _assert_issued(path, permit)
+    return permit, path
 
 
 def verify_permit(
@@ -135,6 +185,15 @@ def verify_permit(
     if not ledger or not env_ledger or \
             Path(ledger).resolve() != Path(env_ledger).resolve():
         raise ExecutionPermitBlocked("PERMIT_LEDGER_MISMATCH", f"permit={ledger}")
+    # Reservation capability: a write probe; failure blocks before any call.
+    try:
+        probe = Path(env_ledger).parent
+        probe.mkdir(parents=True, exist_ok=True)
+        test = probe / ".reservation-probe"
+        test.write_text("")
+        test.unlink()
+    except OSError as exc:
+        raise ExecutionPermitBlocked("PERMIT_LEDGER_UNWRITABLE", str(exc))
     ok("PERMIT_LEDGER")
 
     if str(permit.get("invocation_id") or "") != invocation_id:
@@ -146,6 +205,6 @@ def verify_permit(
 
 
 def assert_authorized(**kwargs) -> dict:
-    """Load the permit from the environment and verify it in one step."""
-    permit = load_permit()
+    """Load the issued permit from the environment and verify it in one step."""
+    permit, _path = load_permit()
     return verify_permit(permit, **kwargs)
