@@ -17,6 +17,10 @@ Usage:
     python3 -m poc.qasper_readercontext_calibration run   # collect (bounded)
     python3 -m poc.qasper_readercontext_calibration build # packets -> predictions
     python3 -m poc.qasper_readercontext_calibration score # unchanged consumer
+
+Evaluation-integrity amendment (post a6cd3b1): every case's paper identity
+binding is verified fail-closed BEFORE the first model call; a mismatch or
+missing provenance refuses the run with 0 calls and 0 ledger reservations.
 """
 
 from __future__ import annotations
@@ -61,6 +65,27 @@ def run() -> int:
     cases = [json.loads(l) for l in
              (RUN_DIR.parent / "qasper-calibration/dev-cases-2papers.jsonl").open()
              if l.strip()]
+    # Fail-closed Paper Identity Binding (evaluation-integrity amendment):
+    # refuse BEFORE any model call when identity cannot be proven.
+    from poc.paper_identity_binding import IdentityBindingBlocked, resolve_binding
+    try:
+        for case in cases:
+            resolve_binding(
+                question_paper_id=case["source_paper_ref"]["paper_id"],
+                question_source_version="v0.3",  # frozen QASPER fixture snapshot
+                reader_run_dir=READER_NOTE.parents[2],
+                note_artifact_path=READER_NOTE,
+                expected_note_digest=hashlib.sha256(
+                    READER_NOTE.read_bytes()).hexdigest(),
+                expected_note_source_version="2508.11428v2",
+                registry_path=AI_PAPERS_ROOT / "data/source-registration-r1.json",
+                split="dev",
+            )
+    except IdentityBindingBlocked as blocked:
+        print(json.dumps({"status": "FAIL_CLOSED",
+                          "reason": "PAPER_IDENTITY_BINDING",
+                          "code": blocked.code}))
+        return 1
     note = reader_note_text()
     raw_dir = RUN_DIR / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
