@@ -1,0 +1,63 @@
+{
+ "schema": "rrsi-gold-review-packet-index/v0.1",
+ "packets": [
+  {
+   "fixture_id": "g1-1802-claim",
+   "packet": "packet-g1-1802-claim.md",
+   "status": "PENDING (awaiting independent review)"
+  },
+  {
+   "fixture_id": "g2-1802-method",
+   "packet": "packet-g2-1802-method.md",
+   "status": "PENDING (awaiting independent review)"
+  },
+  {
+   "fixture_id": "g3-1802-result",
+   "packet": "packet-g3-1802-result.md",
+   "status": "PENDING (awaiting independent review)"
+  },
+  {
+   "fixture_id": "g4-1802-numeric",
+   "packet": "packet-g4-1802-numeric.md",
+   "status": "PENDING (awaiting independent review)"
+  },
+  {
+   "fixture_id": "g5-1802-evidence",
+   "packet": null,
+   "status": "EXCLUDED (Evidence Absence)"
+  },
+  {
+   "fixture_id": "g6-1901-claim",
+   "packet": "packet-g6-1901-claim.md",
+   "status": "PENDING (awaiting independent review)"
+  },
+  {
+   "fixture_id": "g7-1901-method",
+   "packet": "packet-g7-1901-method.md",
+   "status": "PENDING (awaiting independent review)"
+  },
+  {
+   "fixture_id": "g8-1901-result",
+   "packet": "packet-g8-1901-result.md",
+   "status": "PENDING (awaiting independent review)"
+  },
+  {
+   "fixture_id": "g9-1901-evidence",
+   "packet": "packet-g9-1901-evidence.md",
+   "status": "PENDING (awaiting independent review)"
+  }
+ ],
+ "g5_isolation": {
+  "fixture_id": "g5-1802-evidence",
+  "classification": "Evidence Absence",
+  "classification_basis": {
+   "source_sentence_analyzed": "The SnapCaptions dataset is composed of 10K … manually labeled by expert human annotators (composition description)",
+   "release_action_stated_in_source": false,
+   "note_claim": "The study also releases the SnapCaptions dataset, comprising 10,000 expert-annotated pairs",
+   "note_internally_records_release_absence": true,
+   "conflicts_with": "27번 ANSWERABILITY_POLICY_AMBIGUOUS (silence→No release gold; g5 gold 자동 채택 금지)"
+  },
+  "decision": "EXCLUDED from Semantic Reward evaluation (grounding premise fails: source states composition, not a release action; gold 'No' not auto-adopted either side)"
+ },
+ "approval_gate": "poc/gold_review.py — author-path self-approval refused; APPROVED requires all 5 conditions + signed record"
+}

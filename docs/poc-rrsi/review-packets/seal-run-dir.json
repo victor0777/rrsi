@@ -1,0 +1,15 @@
+{
+ "artifact_digests": {
+  "packet-g1-1802-claim.md": "fa16b023146b3565459001c26dc437fce63d939b5eb98c44f1140a685c92666e",
+  "packet-g2-1802-method.md": "7725b489f4d89350df7fdf1393ea5a897c17e0e099fc1256ad7e65e7df350652",
+  "packet-g3-1802-result.md": "1dfa067f29221bf8f9e9d82b075770de34d8fa29f735f182d5c929a64c4aefaa",
+  "packet-g4-1802-numeric.md": "91d345516947fe1759cb790aa740d1ae3d496bd2eef28162a5b09446b57daad9",
+  "packet-g6-1901-claim.md": "277881f1e56385dd7de4fad43d719122b7629a49465d3fb004c0334c8d193afd",
+  "packet-g7-1901-method.md": "4bdf92dbe86079c9461f16303295df09b9681264a469a5219b9c234293fde0db",
+  "packet-g8-1901-result.md": "ed13ef705316f6c13fb6fdfae4207e3c7aa35b00ecf8c1c7f5195366c6f21c5f",
+  "packet-g9-1901-evidence.md": "b4f0db1ecda24583434ec160d157f0fc83c9097a29f328bd52a6739093451aae",
+  "review-packet-index.json": "f9a33d30b9400530388eadff008ed04ccef5feb171cc620b7a9115b3e4be4d5d"
+ },
+ "run_dir": "poc/runs/perturbation-audit/r3-review-packet",
+ "schema": "rrsi-run-dir-seal/v0.1"
+}
