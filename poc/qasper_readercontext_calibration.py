@@ -166,6 +166,15 @@ def run() -> int:
                           "code": gate["code"], "calls": 0,
                           "reservations": 0}))
         return 1
+    # Artifact immutability: invocation-bound, collision-checked run dir.
+    from poc.run_dir_isolation import resolve_run_dir, seal_run_dir
+    permit_invocation = json.loads(
+        Path(os.environ["AI_PAPERS_EXECUTION_PERMIT"]).read_text()
+    ).get("invocation_id") or ""
+    run_dir = resolve_run_dir(
+        os.environ["AI_PAPERS_PROCESS_TELEMETRY_INVOCATION_ID"],
+        RUN_DIR.parent, permit_invocation_id=permit_invocation)
+    RUN_DIR = run_dir  # all raw/summary writes go to the invocation-bound dir
     ds = json.loads(DATASET.read_bytes())
     cases = cases_file()
     # Identity/split verified by preflight; raw collection begins.
@@ -260,6 +269,7 @@ def run() -> int:
                    READER_NOTE_REGISTRY.read_bytes()).hexdigest(),
                "completed_at": datetime.now(UTC).isoformat()}
     (RUN_DIR / "run-summary.json").write_text(json.dumps(summary, indent=1))
+    seal_run_dir(RUN_DIR)  # fix manifest + artifact digests after execution
     print(json.dumps(summary))
     return 0
 
