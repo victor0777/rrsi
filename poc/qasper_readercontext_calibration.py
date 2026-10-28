@@ -48,9 +48,25 @@ from poc.qasper_fulltext_calibration import (
 
 RRSI_ROOT = Path(__file__).resolve().parent.parent
 RUN_DIR = RRSI_ROOT / "poc/runs/qasper-readercontext-calibration"
-# The sha256-bound reader-note artifact from adapter preparation (5038b87).
+# Legacy single artifact (a6cd3b1 run; INVALID_CONTEXT_MISMATCH — see 21).
 READER_NOTE = (RRSI_ROOT / "poc/runs/r0b2/reader/r0b2-repeat-4b"
                / "02_reading_chain/output/04_reader_note.ko.md")
+# Per-paper note registry (R1 generation; identity-bound per paper).
+READER_NOTE_REGISTRY = (RRSI_ROOT
+                        / "poc/runs/qasper-reader-note-r1/source-registration-rrsi.json")
+
+
+def reader_notes() -> dict:
+    """paper_id -> {"artifact": Path, "sha256": str} from the rrsi registry."""
+    reg = json.loads(READER_NOTE_REGISTRY.read_text())
+    return {
+        paper_id: {
+            "artifact": RRSI_ROOT / entry["reader_note_artifact"],
+            "sha256": entry["reader_note_sha256"],
+            "source_version": entry["canonical_arxiv_version_id"],
+        }
+        for paper_id, entry in reg["sources"].items()
+    }
 
 
 def reader_note_text() -> str:
@@ -61,24 +77,41 @@ def reader_note_text() -> str:
 
 
 def run() -> int:
+    import os
+    # Fail-closed: model calls must go through the ledger/telemetry bindings.
+    # An unbound invocation is refused BEFORE identity checks (0 calls).
+    for env in ("AI_PAPERS_MODEL_CALL_BUDGET_LEDGER",
+                "AI_PAPERS_MODEL_CALL_CEILING",
+                "AI_PAPERS_PROCESS_TELEMETRY_EVENTS",
+                "AI_PAPERS_PROCESS_TELEMETRY_INVOCATION_ID"):
+        if not os.environ.get(env):
+            print(json.dumps({"status": "FAIL_CLOSED",
+                              "reason": "CALL_BUDGET_ENV_ABSENT", "env": env}))
+            return 1
     ds = json.loads(DATASET.read_bytes())
     cases = [json.loads(l) for l in
              (RUN_DIR.parent / "qasper-calibration/dev-cases-2papers.jsonl").open()
              if l.strip()]
     # Fail-closed Paper Identity Binding (evaluation-integrity amendment):
-    # refuse BEFORE any model call when identity cannot be proven.
+    # each case must bind to ITS OWN paper's reader note before any call.
     from poc.paper_identity_binding import IdentityBindingBlocked, resolve_binding
+    notes = reader_notes()
     try:
         for case in cases:
+            paper_id = case["source_paper_ref"]["paper_id"]
+            binding_note = notes.get(paper_id)
+            if binding_note is None:
+                raise IdentityBindingBlocked(
+                    "READER_NOTE_REGISTRY_ENTRY_ABSENT", paper_id)
+            note_path = binding_note["artifact"]
             resolve_binding(
-                question_paper_id=case["source_paper_ref"]["paper_id"],
+                question_paper_id=paper_id,
                 question_source_version="v0.3",  # frozen QASPER fixture snapshot
-                reader_run_dir=READER_NOTE.parents[2],
-                note_artifact_path=READER_NOTE,
-                expected_note_digest=hashlib.sha256(
-                    READER_NOTE.read_bytes()).hexdigest(),
-                expected_note_source_version="2508.11428v2",
-                registry_path=AI_PAPERS_ROOT / "data/source-registration-r1.json",
+                reader_run_dir=note_path.parents[2],
+                note_artifact_path=note_path,
+                expected_note_digest=binding_note["sha256"],
+                expected_note_source_version=binding_note["source_version"],
+                registry_path=READER_NOTE_REGISTRY,
                 split="dev",
             )
     except IdentityBindingBlocked as blocked:
@@ -86,7 +119,6 @@ def run() -> int:
                           "reason": "PAPER_IDENTITY_BINDING",
                           "code": blocked.code}))
         return 1
-    note = reader_note_text()
     raw_dir = RUN_DIR / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     head = ai_papers_head()
@@ -101,6 +133,9 @@ def run() -> int:
             return 1
         paper_id = case["source_paper_ref"]["paper_id"]
         question = case["input_payload"]["question"]
+        binding_note = notes[paper_id]
+        note_path = binding_note["artifact"]
+        note = note_path.read_text(encoding="utf-8")
         user = (f"Paper reading note:\n\"\"\"\n{note}\n\"\"\"\n\nQuestion: {question}\n\n"
                 'Respond with the JSON object now (answer_text, answer_type, evidence_quotes).')
         sys.path.insert(0, str(AI_PAPERS_ROOT / "src"))
@@ -125,7 +160,7 @@ def run() -> int:
         packet = {
             "case_id": case["case_id"], "paper_id": paper_id,
             "input_mode": "reader_context",
-            "reader_note_artifact": str(READER_NOTE),
+            "reader_note_artifact": str(note_path),
             "reader_note_sha256": hashlib.sha256(note.encode()).hexdigest(),
             "ai_papers_commit": head,
             "dataset_sha256": hashlib.sha256(DATASET.read_bytes()).hexdigest(),
@@ -152,7 +187,7 @@ def run() -> int:
                 },
                 "execution_metadata": {
                     "replay_cli": "poc.qasper_readercontext_calibration (rrsi glue)",
-                    "artifact_ref": READER_NOTE.name,
+                    "artifact_ref": note_path.name,
                     "run_id": f"qasper-rc-cal-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}",
                     "determinism": "single_run",
                 },
@@ -170,7 +205,8 @@ def run() -> int:
     summary = {"schema": "rrsi-qasper-readercontext-run/v0.1", "calls_used": calls,
                "wall_seconds": round(time.monotonic() - started, 1),
                "model": APPROVED_MODEL,
-               "reader_note_sha256": hashlib.sha256(note.encode()).hexdigest(),
+               "reader_note_registry_sha256": hashlib.sha256(
+                   READER_NOTE_REGISTRY.read_bytes()).hexdigest(),
                "completed_at": datetime.now(UTC).isoformat()}
     (RUN_DIR / "run-summary.json").write_text(json.dumps(summary, indent=1))
     print(json.dumps(summary))
@@ -211,8 +247,8 @@ def build() -> int:
         "dataset_path": str(DATASET),
         "dataset_sha256": hashlib.sha256(DATASET.read_bytes()).hexdigest(),
         "input_mode": "reader_context",
-        "reader_note_sha256": hashlib.sha256(
-            reader_note_text().encode()).hexdigest(),
+        "reader_note_registry_sha256": hashlib.sha256(
+            READER_NOTE_REGISTRY.read_bytes()).hexdigest(),
         "prediction_count": len(predictions),
     }
     (RUN_DIR / "predictions.json").write_text(
