@@ -35,18 +35,38 @@ BLOCKED_CONFLICTED (평가 금지 유지)**, EVOLVE 2건(2508.11428 획득됨,
 2511.13079 미획득). **R7이 이 집합을 평가 자료로 소비하지 않는다** —
 EVOLVE 재할당은 별도 Owner 결정 사항.
 
-## 2. Unseen Evaluation Set 선정 절차
+## 2. Unseen Evaluation Set 선정 절차 (D1 강화 계약)
 
-1. 후보 논문 풀: R6 계약 개발·발췌에 사용된 논문(1802.07862,
-   1901.10133) 및 동일 arXiv 계열 전체 **배제**.
-2. QASPER dev-v0.3(`research_benchmarks/benchmarks/qasper/dataset/`,
-   sha256 `2ae7ee62…`)에서 논문 2–3편 선정, 선정 근거(길이·주제 다양성)
-   기록.
-3. **논문 단위 분리 증명**: id 목록 교집합 = ∅ 증명 스크립트 결과를
-   R7-D0 산출물로 고정 (문서 3 Admission ①의 증명).
-4. 각 논문의 Reader Note는 R6I 노트 생성 파이프라인
-   (`poc/runs/qasper-reader-note-r1/reader/…`)과 동일 조건으로 생성 후
-   원본으로 확정 — 생성 자체는 E1 별도 승인 사항.
+**분리는 두 축으로 별도 관리** — 논문 분리 축(id·이력)과 평가 유형 축
+(Development / Unseen-eval / Challenge 레이어). Challenge는 **Unseen
+논문 위의 별도 평가 층**으로 정의 (집합 상호배타가 아니라 논문 축을
+공유하는 유형 층) — 사례는 이 두 축의 조합으로 소속이 결정되며,
+Development 논문으로 Challenge를 만들 수 없다.
+
+논문 분리 축 검증 (id 일치만으로 불충분 — 아래 전부 확인):
+
+1. **논문 ID·버전 중복**: Development 논문과 ID·버전 교집합 ∅.
+2. **Reader Note 생성·평가 이력**: 후보 논문이 이전 `ai_papers` 실험
+   (reader-note-quality GT, calibration, reader-context 등 —
+   `ai_papers/docs/eval/reader-note-quality/`,
+   `poc/runs/qasper-*-calibration/`)에서 사용됐는지 이력 조사 →
+   사용 이력이 있으면 Unseen 제외.
+3. **Judge Prompt 개발 노출 이력**: R5–R6 계약·발췌·디버깅에 노출된
+   논문 전부 배제 (1802.07862·1901.10133 계열).
+4. **Gold·Perturbation 설계 자료 중복**: semantic gold fixture
+   설계·리뷰 패킷(`docs/poc-rrsi/review-packets*/`,
+   `poc/runs/perturbation-audit/`)에 사용된 논문 배제.
+
+절차:
+
+1. 후보 풀: QASPER dev-v0.3(`research_benchmarks/benchmarks/qasper/`,
+   sha256 `2ae7ee62…`)에서 위 4항목 이력 조사 후 무노출 논문만.
+2. 2–3편 선정, 선정 근거(길이·주제 다양성) 기록.
+3. **분리 증명 산출물**: 교집합 ∅ 스크립트 결과 + 논문별 노출 이력
+   조사 기록을 `poc/runs/r7-evaluation/separation-proof.json`으로
+   고정 (Admission ①의 증명 — id 교집합과 노출 이력 둘 다 포함).
+4. 각 논문의 Reader Note는 R6I 노트 생성 파이프라인과 동일 조건으로
+   생성 후 원본 확정 — 생성 자체는 E1 별도 승인 사항.
 
 ## 3. Gold Quality Gate 절차 (사례당)
 
@@ -76,12 +96,12 @@ EVOLVE 재할당은 별도 Owner 결정 사항.
 
 Challenge 집계는 주 지표와 **분리 보고** (혼합 금지).
 
-## 5. Gold 검증 작업량 추정 (R7-E1 규모)
+## 5. Gold 검증 작업량 (R7-E1 규모 — 재산정)
 
-- 사례 12건(문서 1 §8) × 5항목 수동 검토: 사례당 ~30–45분
+- 사례 12건 × 5항목 수동 검토: 사례당 ~30–45분
 - 원본 Note 정밀 검토 3편: 편당 ~1시간
-- 총 ≈ **12–15시간 수동 검토** (독립 검토자 2인 기준 배가)
-- Gate 결과 기록·동결: ~1시간 (스크립트 보조)
+- **검토자 1인당 약 9–12시간**; 검토자 2인 기준 **18–24인시**
+- 의견 불일치 조정(adjudication) 시간은 별도 (사례당 +15분 가정)
 
 ## 6. 차단 요인 및 해소 경로
 
@@ -90,4 +110,5 @@ Challenge 집계는 주 지표와 **분리 보고** (혼합 금지).
 | Unseen 논문·Note 미확보 | B/C 세트 부재 | E1 전 논문 확보 + Note 생성(별도 승인) |
 | 독립 검토자 미확보 | Gate 5항목 불성립 | Owner 지정 검토자 2인 |
 | `insufficient evidence` 상태 이월 | 유효 표본 감소 | 사례별 보강 근거 또는 EXCLUDED 처리 |
+| 후보 논문의 숨은 노출 이력 | 실질 Unseen 상실 | §2 4항목 이력 조사 (D1 계약) |
 | EVOLVE 세트 재할당 요청 시 | split freeze 계약 | Owner 결정 없이는 접촉 금지 |
