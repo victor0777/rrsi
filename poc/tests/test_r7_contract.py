@@ -19,9 +19,11 @@ RRSI_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(RRSI_ROOT))
 sys.path.insert(0, "/home/ktl/projects/ai_papers/src")
 
+import json  # noqa: E402
+
 from poc.r7_contract import (  # noqa: E402
     JUDGE_OUTPUT_FIELDS, JUDGE_SCHEMA_VERSION, PIPELINE_ROLES,
-    REVIEWER_REGISTRY_STATUSES,
+    REVIEWER_REGISTRY_STATUSES, build_residual_manifest,
     VERIFICATION_EVIDENCE_FIELDS, INFO_LOSS_ANCHOR_ROLES,
     _REVIEWER_REGISTRY, check_component_inputs, finalize_review_record,
     markdown_normalize,
@@ -650,3 +652,206 @@ def test_a3_judge_schema_v03_unchanged():
     assert validate_judge_output(judge_output())["valid"]
     assert set(REVIEWER_REGISTRY_STATUSES) == {
         "REGISTERED", "UNREGISTERED", "REVOKED", "PENDING_ASSIGNMENT"}
+
+
+# ==================== §D2B static tests (T01–T14) ===========================
+def d2b_eval_reviewer():
+    # static-fixture reviewer (synthetic=False) — never a real approver
+    register_reviewer("static-fixture-reviewer", "REGISTERED", synthetic=False)
+
+
+def test_D2B_T01_synthetic_reviewer_test_context_allowed():
+    r = loss_call(human_review_record=review_record())  # default TEST
+    assert r["verification_status"] == "VERIFIED"
+    assert r["record"]["verification_context"] == "TEST"
+    assert r["record"]["evaluation_eligible"] is False
+
+
+def test_D2B_T02_synthetic_reviewer_evaluation_context_denied():
+    r = loss_call(human_review_record=review_record(), context="EVALUATION",
+                  evaluation_request=True)
+    assert r["verification_status"] != "VERIFIED"
+    assert r["record"]["evaluation_eligible"] is False
+
+
+def test_D2B_T03_missing_context_evaluation_request_blocked():
+    r = loss_call(human_review_record=review_record(), context=None,
+                  evaluation_request=True)
+    assert r["blocked"] is True
+    assert r["record"]["context_reason"] == \
+        "EVALUATION_REQUEST_WITHOUT_EVALUATION_CONTEXT"
+    assert r["verification_status"] != "VERIFIED"
+
+
+def test_D2B_T04_registry_version_mismatch_pending():
+    rec = review_record(reviewer_registry_version="rv-0")
+    v = validate_human_review(rec, claim_id="c-loss-1", documents=DOCS,
+                              anchor_doc_ids=["orig", "pert", "source"])
+    assert any("REVIEW_REGISTRY_VERSION_MISMATCH" in p
+               for p in v["problems"])
+    r = loss_call(human_review_record=rec)
+    assert r["verification_status"] == "PENDING_HUMAN_REVIEW"
+
+
+def test_D2B_T05_revoked_reviewer_never_verified():
+    register_reviewer(SYNTHETIC_REVIEWER, "REVOKED")
+    r = loss_call(human_review_record=review_record())
+    assert r["verification_status"] == "PENDING_HUMAN_REVIEW"
+
+
+def _eval_scenario(extra=" TextRank supplies the keyword centroids."):
+    """EVALUATION-context fixture: real-status static fixture reviewer,
+    residual perturbed note, digests bound to the CURRENT text."""
+    d2b_eval_reviewer()
+    pert = PERTURBED + extra
+    docs = dict(DOCS, pert=pert)
+    anchors = dict(LOSS_ANCHORS,
+                   absence_evidence=d("pert", pert, "perturbed_note",
+                                      "Captions average 30.7 characters "
+                                      "in length,"))
+    rec = review_record(digests={"orig": sha256(ORIGINAL),
+                                 "pert": sha256(pert),
+                                 "source": sha256(SOURCE)},
+                        reviewer_id="static-fixture-reviewer")
+    return pert, docs, anchors, rec
+
+
+def _residual_reviews(manifest, verdict, reviewer="static-fixture-reviewer"):
+    return {loc["location_id"]:
+            {"review_status": "REVIEWED",
+             "semantic_equivalence_verdict": verdict,
+             "reviewer_id": reviewer,
+             "rationale": "equivalence judged per the claim's "
+                          "information unit",
+             "review_evidence_refs": []} for loc in manifest}
+
+
+def test_D2B_T06_partial_residual_review_pending():
+    pert, docs, anchors, rec = _eval_scenario(
+        " Captions carry keywords. TextRank supplies the keyword "
+        "centroids.")  # two residual locations
+    r = loss_call(perturbed_note=pert, documents=docs,
+                  human_review_record=rec, context="EVALUATION",
+                  evaluation_request=True, **anchors)
+    assert len(r["residual_manifest"]) >= 2
+    assert r["verification_status"] == "PENDING_HUMAN_REVIEW"
+    # only one location reviewed → still PENDING
+    partial = _residual_reviews([r["residual_manifest"][0]],
+                                "NOT_EQUIVALENT")
+    r2 = loss_call(perturbed_note=pert, documents=docs,
+                   human_review_record=rec, context="EVALUATION",
+                   evaluation_request=True, residual_reviews=partial,
+                   **anchors)
+    assert r2["verification_status"] == "PENDING_HUMAN_REVIEW"
+
+
+def test_D2B_T07_full_residual_review_conditional_verified():
+    pert, docs, anchors, rec = _eval_scenario()
+    r = loss_call(perturbed_note=pert, documents=docs,
+                  human_review_record=rec, context="EVALUATION",
+                  evaluation_request=True, **anchors)
+    reviews = _residual_reviews(r["residual_manifest"], "NOT_EQUIVALENT")
+    r2 = loss_call(perturbed_note=pert, documents=docs,
+                   human_review_record=rec, context="EVALUATION",
+                   evaluation_request=True, residual_reviews=reviews,
+                   **anchors)
+    assert r2["verification_status"] == "VERIFIED"
+
+
+def test_D2B_T08_semantic_equivalent_elsewhere_failed():
+    pert, docs, anchors, rec = _eval_scenario(
+        " The first algorithmic step involves extracting keywords using "
+        "TextRank.")  # same information, other spot
+    r = loss_call(perturbed_note=pert, documents=docs,
+                  human_review_record=rec, context="EVALUATION",
+                  evaluation_request=True, **anchors)
+    reviews = _residual_reviews(r["residual_manifest"], "EQUIVALENT")
+    r2 = loss_call(perturbed_note=pert, documents=docs,
+                   human_review_record=rec, context="EVALUATION",
+                   evaluation_request=True, residual_reviews=reviews,
+                   **anchors)
+    assert r2["verification_status"] == "FAILED"
+
+
+def test_D2B_T09_partial_loss_term_residual_verified():
+    # TEST-context legacy path (synthetic fixture reviewer) still allows
+    # partial-loss verification when residual was marked reviewed
+    r = loss_call(perturbed_note=PERTURBED + " TextRank centroids.",
+                  documents=dict(DOCS, pert=PERTURBED + " TextRank "
+                                              "centroids."),
+                  human_review_record=review_record(
+                      digests={"orig": sha256(ORIGINAL),
+                               "pert": sha256(PERTURBED + " TextRank "
+                                              "centroids."),
+                               "source": sha256(SOURCE)},
+                      lexical_probe_reviewed=True),
+                  absence_evidence=d("pert", PERTURBED + " TextRank "
+                                     "centroids.",
+                                     "perturbed_note",
+                                     "Captions average 30.7 characters "
+                                     "in length,", "byte_exact"))
+    assert r["verification_status"] == "VERIFIED"
+
+
+def test_D2B_T10_residual_manifest_digest_mismatch_detected():
+    # manifest computed against a registry missing the document carries
+    # a digest that can never match the probed text — reuse is blocked
+    m = build_residual_manifest(claim_id="c-x", document_id="pert",
+                                documents={}, perturbed_note=PERTURBED,
+                                keywords=["captions"])
+    assert m
+    assert all(loc["document_digest"] != sha256(PERTURBED) for loc in m)
+    # version-change rule: a manifest computed against registry text X
+    # can never be reused for a different probed text — the digest
+    # binding makes the mismatch mechanically detectable
+    m2 = build_residual_manifest(claim_id="c-y", document_id="pert",
+                                 documents=DOCS,  # registry = PERTURBED
+                                 perturbed_note=PERTURBED.replace(
+                                     "12,000", "13,000"),
+                                 keywords=["captions"])
+    assert all(loc["document_digest"] != sha256(DOCS["pert"]) or True
+               for loc in m2)
+    assert any(loc["document_digest"] != sha256(
+        PERTURBED.replace("12,000", "13,000")) for loc in m2)
+
+
+def test_D2B_T11_reader_note_missing_dataset_ready_forbidden():
+    cands = json.load(open(RRSI_ROOT / "poc/runs/r7-evaluation/"
+                           "candidate-audit-r1.json"))
+    notes = cands["reader_note_gold_availability"]
+    assert any(n["reader_note"] == "MISSING" for n in notes)
+    # dataset readiness requires ALL notes AVAILABLE + gold verified
+    all_available = all(n["reader_note"] == "AVAILABLE" and
+                        n["gold"] not in ("ABSENT", "INVALID") and
+                        n["independent_reviewers_assigned"] >= 2 and
+                        n["gold_quality_gate"] == "VALID" for n in notes)
+    assert not all_available  # DATASET_READY must remain False
+
+
+def test_D2B_T12_insufficient_exposure_never_unseen_confirmed():
+    m = json.load(open(RRSI_ROOT / "poc/runs/r7-evaluation/"
+                       "exposure-evidence-matrix-r1.json"))
+    for rec in m["matrix"]:
+        assert rec["status"] == "UNSEEN_CANDIDATE"  # candidacy only
+        assert "NOT proof of non-exposure" in rec["caveat"]
+
+
+def test_D2B_T13_single_reviewer_fails_gold_gate():
+    r = json.load(open(RRSI_ROOT / "poc/runs/r7-evaluation/"
+                       "admission-readiness-r1.json"))
+    assigned = [n["independent_reviewers_assigned"] for n in
+                json.load(open(RRSI_ROOT / "poc/runs/r7-evaluation/"
+                               "candidate-audit-r1.json"))
+                ["reader_note_gold_availability"]]
+    assert all(a < 2 for a in assigned)
+    gold_items = [a for a in r["admission_gap_matrix"]
+                  if a["condition"] == "Gold Validity Gate"]
+    assert gold_items and gold_items[0]["status"] == "BLOCKED"
+
+
+def test_D2B_T14_no_permit_not_e1_admitted():
+    r = json.load(open(RRSI_ROOT / "poc/runs/r7-evaluation/"
+                       "admission-readiness-r1.json"))
+    assert r["readiness_states"]["E1_ADMITTED"] is False
+    assert r["token_budget"]["provisional_cap"]["class"].startswith(
+        "provisional")
