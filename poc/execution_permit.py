@@ -42,8 +42,9 @@ ISSUANCE_LEDGER = "execution-permit-issuance.jsonl"
 ISSUED_EVENT = "execution_permit_issued"
 
 KNOWN_WORKSTREAMS = ("reader_note_generation", "reader_context_qa",
-                     "fulltext_qa", "abstract_qa", "diagnostic_analysis")
-KNOWN_CALL_TYPES = ("reader_chain", "qa_inference")
+                     "fulltext_qa", "abstract_qa", "diagnostic_analysis",
+                     "semantic_judge_pilot")
+KNOWN_CALL_TYPES = ("reader_chain", "qa_inference", "judge_evaluation")
 
 
 class ExecutionPermitBlocked(Exception):
