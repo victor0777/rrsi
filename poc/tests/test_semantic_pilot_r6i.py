@@ -145,12 +145,15 @@ def test_unblind_map_manifest_reference_matches():
 # ------------------------------- §B — g7 full-note path ---------------------
 def test_g7_claim_verification_pending_human_review():
     res = verify_g7_claims_vs_full_note(judge={"relative": "A"},
-                                        full_note=PERTURBED_G7.read_text())
+                                        full_note=PERTURBED_G7.read_text(),
+                                        unblind_map={"A": "original",
+                                                     "B": "perturbed"})
     # the full perturbed note still contains the methodology core, and the
     # P5 target bullet is genuinely absent — the automated check cannot
     # separate perturbation loss from excerpt loss on claims, so pending.
     assert res["methodology_core_intact_in_full_note"]
     assert res["p5_target_absent_from_full_note"]
+    assert res["claims_loss"] is True
     assert res["result_status"] == "PENDING_HUMAN_REVIEW"
     assert res["semantic_success"] is False
     assert res["disagreement_auto_truth"] is False
@@ -158,16 +161,22 @@ def test_g7_claim_verification_pending_human_review():
 
 def test_g7_verification_sufficient_when_core_gone():
     # a note without any methodology category must verify as sufficient
-    res = verify_g7_claims_vs_full_note(judge={"relative": "A"},
-                                        full_note="nothing here")
+    res = verify_g7_claims_vs_full_note(
+        judge={"relative": "A"}, full_note="nothing here",
+        unblind_map={"A": "original", "B": "perturbed"})
     assert res["result_status"] == "VERIFIED"
     assert res["semantic_success"] is True
 
 
 def test_g7_no_loss_claim_when_equal():
     res = verify_g7_claims_vs_full_note(judge={"relative": "equal"},
-                                        full_note=PERTURBED_G7.read_text())
-    assert res["result_status"] == "VERIFIED"  # no omission claim to verify
+                                        full_note=PERTURBED_G7.read_text(),
+                                        unblind_map={"A": "original",
+                                                     "B": "perturbed"})
+    # equal makes no loss claim: nothing verified as success
+    assert res["claims_loss"] is False
+    assert res["result_status"] == "PENDING_HUMAN_REVIEW"
+    assert res["semantic_success"] is False
 
 
 def test_g7_adjudication_carries_claim_verification():
@@ -196,8 +205,12 @@ def test_runner_cannot_self_approve():
     assert "--approve" not in src.replace("--owner-approval", "")
 
 
-def test_owner_approval_record_verification(tmp_path):
-    from poc.semantic_pilot_r6i import INVOCATION_ID
+def test_owner_approval_record_verification(tmp_path, monkeypatch):
+    from poc.semantic_pilot_r6i import INVOCATION_ID, OWNER_REGISTRY
+    monkeypatch.setattr("poc.semantic_pilot_r6i.OWNER_REGISTRY",
+                        tmp_path / "registry.json")
+    (tmp_path / "registry.json").write_text(json.dumps(
+        {"owners": [{"identity": "owner", "authority": True}]}))
     rec = {"invocation_id": INVOCATION_ID, "approved_by": "owner",
            "approval_reference": "r6i directive"}
     good = tmp_path / "approval.json"
@@ -251,3 +264,109 @@ def test_ledger_official_api_ceiling_boundary(tmp_path, monkeypatch):
         reserve_model_call_from_environment(call_id="c5")
     with pytest.raises(ModelCallBudgetExceededError):
         reserve_model_call_from_environment(call_id="c5")  # rejected row keeps ordinal
+
+
+# ---------------- R6I pre-execution audit P0 (fail-first tests) -------------
+def test_issued_permit_passes_assert_authorized(monkeypatch, tmp_path):
+    """P0-1: a permit issued by the owner issuer must verify against the
+    EXISTING execution_permit contract (no schema weakening)."""
+    import poc.owner_issue_permit as issuer
+    monkeypatch.setattr(issuer, "WORK_ROOT", tmp_path / "work")
+    # keep the test out of the real issuance ledger
+    monkeypatch.setattr("poc.execution_permit.issuance_ledger_path",
+                        lambda: tmp_path / "issuance.jsonl")
+    issued = issuer.issue(approval_record=None)  # structural permit only
+    permit_path = Path(issued["permit"])
+    monkeypatch.setenv("AI_PAPERS_EXECUTION_PERMIT", str(permit_path))
+    for k, v in issued["budget_env"].items():
+        monkeypatch.setenv(k, v)
+    from poc.execution_permit import assert_authorized
+    from poc.qasper_fulltext_calibration import DATASET
+    verified = assert_authorized(
+        workstream="semantic_judge_pilot", call_type="judge_evaluation",
+        dataset_sha256=__import__("hashlib")
+            .sha256(DATASET.read_bytes()).hexdigest(),
+        paper_ids=["1802.07862", "1901.10133"],
+        model="qwen38-27b-fp8-vllm-tp1-ktl02",
+        endpoint="http://127.0.0.1:8004/v1",
+        invocation_id="semjudge-r6i-g4g7")
+    assert "PERMIT_BUDGET" in verified["checks"]
+
+
+def test_runner_does_not_issue_permit_itself():
+    """P0-2: the execute path must not self-issue/register permits."""
+    import poc.run_r6i as run_r6i
+    src = Path(run_r6i.__file__).read_text()
+    assert "register_permit" not in src, "runner must not register permits"
+    import poc.owner_issue_permit as issuer
+    isrc = Path(issuer.__file__).read_text()
+    assert "register_permit" in isrc, "issuance belongs to the owner issuer"
+
+
+def test_approval_record_presence_vs_authority(tmp_path):
+    """P0-2: a present record with an unregistered approver must be refused:
+    existence is not authority."""
+    from poc.semantic_pilot_r6i import INVOCATION_ID
+    rec = {"invocation_id": INVOCATION_ID, "approved_by": "mystery-user",
+           "approval_reference": "x"}
+    p = tmp_path / "approval.json"
+    p.write_text(json.dumps(rec))
+    prov = verify_owner_approval_record(str(p))
+    assert prov["record_present"] is True
+    assert prov["authority_verified"] is False
+    assert prov["error"] == "OWNER_APPROVAL_AUTHORITY_UNVERIFIED"
+
+
+def test_g7_claims_loss_uses_unblind_map_both_orders():
+    """P0-3: no fixed A/B assumption — both blind placements tested.
+    A loss claim = the judge rates the ORIGINAL slot higher."""
+    full = PERTURBED_G7.read_text()
+    for unblind in ({"A": "original", "B": "perturbed"},
+                    {"A": "perturbed", "B": "original"}):
+        perturbed_slot = next(s for s, k in unblind.items() if k == "perturbed")
+        original_slot = next(s for s, k in unblind.items() if k == "original")
+        res = verify_g7_claims_vs_full_note(
+            judge={"relative": original_slot}, full_note=full,
+            unblind_map=unblind)
+        assert res["claims_loss"] is True
+        res = verify_g7_claims_vs_full_note(
+            judge={"relative": perturbed_slot}, full_note=full,
+            unblind_map=unblind)
+        assert res["claims_loss"] is False
+
+
+def test_semantic_success_separate_from_verified_status():
+    """P0-4: VERIFIED / AGREEMENT / semantic_success are distinct; equal,
+    abstain, or no-claim-only never records success."""
+    rec = {"fixture_id": "g7-1901-method",
+           "dimension": "Partial Required Information Coverage Loss",
+           "pair": {"A_text": "A", "B_text": "B",
+                    "unblind_map": {"A": "original", "B": "perturbed"}}}
+    # equal: no omission claim to verify — never success
+    res = adjudicate_response(
+        fid="g7-1901-method",
+        raw=json.dumps({"relative": "equal", "a_verdict": "high",
+                        "b_verdict": "high", "ev_a": ["x"], "ev_b": ["y"]}),
+        rec=rec, full_perturbed_note=PERTURBED_G7.read_text())
+    assert res["claim_verification"]["result_status"] == "PENDING_HUMAN_REVIEW"
+    assert res["claim_verification"]["claims_loss"] is False
+    assert res["semantic_success"] is False
+    # abstain: never success
+    res = adjudicate_response(
+        fid="g7-1901-method",
+        raw=json.dumps({"relative": "abstain", "reason": "cannot judge",
+                        "a_verdict": "low", "b_verdict": "low",
+                        "ev_a": ["x"], "ev_b": ["y"]}),
+        rec=rec, full_perturbed_note=PERTURBED_G7.read_text())
+    assert res["result_status"] == "ABSTAINED"
+    assert res["semantic_success"] is False
+    # a loss claim that survives full-note verification is the ONLY success
+    no_core = "\n\n".join(["plain text without any methodology"]) * 5
+    res = adjudicate_response(
+        fid="g7-1901-method",
+        raw=json.dumps({"relative": "A", "a_verdict": "high",
+                        "b_verdict": "low", "ev_a": ["x"], "ev_b": ["y"]}),
+        rec=rec, full_perturbed_note=no_core)
+    assert res["claim_verification"]["result_status"] == "VERIFIED"
+    assert res["claim_verification"]["claims_loss"] is True
+    assert res["semantic_success"] is True

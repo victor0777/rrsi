@@ -1,0 +1,9 @@
+{
+ "schema": "rrsi-owner-registry/v0.1",
+ "owners": [
+  {
+   "identity": "Hongseok Lee",
+   "authority": true
+  }
+ ]
+}

@@ -466,7 +466,8 @@ def adjudicate_response(*, fid: str, raw: str, rec: dict,
               "claim_verification": None, "semantic_success": False}
     if fid == "g7-1901-method":
         result["claim_verification"] = verify_g7_claims_vs_full_note(
-            judge=judge, full_note=full_perturbed_note)
+            judge=judge, full_note=full_perturbed_note,
+            unblind_map=rec["pair"]["unblind_map"])
         result["semantic_success"] = bool(
             result["claim_verification"].get("semantic_success"))
     return result
@@ -483,15 +484,18 @@ def _citation_accuracy(judge: dict, rec: dict) -> dict:
     return checks
 
 
-def verify_g7_claims_vs_full_note(*, judge: dict, full_note: str) -> dict:
+def verify_g7_claims_vs_full_note(*, judge: dict, full_note: str,
+                                  unblind_map: dict) -> dict:
     """§B — judge's claimed methodology omissions must hold against the FULL
     perturbed note. The v2 contract carries no free-text omission list, so
-    the automated check is bounded: (a) verify the known P5 target loss is
-    genuinely absent from the full note; (b) verify the methodology
-    inventory of the full note per directive category. If the judge rates
-    the perturbed side lower while the full note still contains the
-    methodology core, automated verification is insufficient — the fixture
-    is PENDING_HUMAN_REVIEW and is NOT counted as Semantic Success.
+    the automated check is bounded: (a) the known P5 target loss is
+    genuinely absent from the full note; (b) the methodology inventory per
+    directive category. VERIFIED is a CLAIM-VERIFICATION status only —
+    semantic_success is recorded ONLY when the judge makes a loss claim
+    (relative == perturbed slot, from the manifest's unblind_map — no fixed
+    A/B assumption) AND that claim survives full-note verification. An
+    unverifiable claim keeps the fixture PENDING_HUMAN_REVIEW, never
+    aggregated as Semantic Success.
     """
     inventory = {c: bool(re.search(rx, full_note))
                  for c, rx in G7_CATEGORIES.items()}
@@ -501,56 +505,83 @@ def verify_g7_claims_vs_full_note(*, judge: dict, full_note: str) -> dict:
                       ("keyword_extraction", "initial_sentence_mapping",
                        "combined_similarity_score", "sim1_sim2",
                        "experiment_results"))
-    claims_loss = judge["relative"] in ("A",)  # A higher ⇒ B lost info
-    if not claims_loss:
-        sufficient = True  # no omission claim to verify (equal/abstain path)
-    elif target_absent and not core_intact:
-        sufficient = True  # claimed loss is genuine at full-note level
-    else:
-        sufficient = False
+    original_slot = next(s for s, k in unblind_map.items() if k == "original")
+    # the judge rates the ORIGINAL side higher ⇒ claims the PERTURBED side
+    # lost required information (no fixed A/B assumption — unblind_map)
+    claims_loss = judge["relative"] == original_slot
+    verified = claims_loss and target_absent and not core_intact
     return {
         "full_note_methodology_inventory": inventory,
         "p5_target_absent_from_full_note": target_absent,
         "methodology_core_intact_in_full_note": core_intact,
-        "automated_verification": "SUFFICIENT" if sufficient
+        "claims_loss": claims_loss,
+        "claim_verified_against_full_note": verified,
+        "automated_verification": "SUFFICIENT" if verified
         else "INSUFFICIENT",
-        "result_status": ("VERIFIED" if sufficient
+        "result_status": ("VERIFIED" if verified
                           else "PENDING_HUMAN_REVIEW"),
-        "semantic_success": sufficient,
+        "semantic_success": verified,
         "disagreement_auto_truth": False,
-        "note": ("no judge verdict or gold is promoted to truth; a "
-                 "PENDING_HUMAN_REVIEW fixture is never aggregated as "
-                 "Semantic Success"),
+        "note": ("VERIFIED without a loss claim (equal/abstain/no-claim) "
+                 "records NO success; a PENDING_HUMAN_REVIEW fixture is "
+                 "never aggregated as Semantic Success"),
     }
+
+
+OWNER_REGISTRY = RRSI_ROOT / "poc" / "owner_registry.json"
+
+
+def _registered_owner_authority(approved_by: str) -> bool:
+    """P0-2 — authority is verified against a committed owner registry, NOT
+    inferred from the record file's existence."""
+    if not OWNER_REGISTRY.exists():
+        return False
+    try:
+        registry = json.loads(OWNER_REGISTRY.read_text())
+    except Exception:
+        return False
+    entries = registry.get("owners") or []
+    return any(e.get("identity") == approved_by and e.get("authority") is True
+               for e in entries)
 
 
 def verify_owner_approval_record(path: str) -> dict:
     """§C — verify an owner-issued approval record; never create one.
 
-    The record must pre-exist, name this invocation, and carry an owner
-    identity. Runner vs. owner roles are kept distinct: provenance records
-    WHERE approval came from (owner record file, digest) and WHO executes
-    (this runner).
+    Separates (a) the record's EXISTENCE from (b) the approver's AUTHORITY
+    (verified against the committed owner registry). Runner vs. owner roles
+    are kept distinct: provenance records WHERE approval came from (owner
+    record file, digest) and WHO executes (this runner).
     """
     if not path:
-        return {"error": "OWNER_APPROVAL_REQUIRED"}
+        return {"error": "OWNER_APPROVAL_REQUIRED", "record_present": False,
+                "authority_verified": False}
     p = Path(path)
     if not p.exists():
-        return {"error": f"OWNER_APPROVAL_RECORD_MISSING:{path}"}
+        return {"error": f"OWNER_APPROVAL_RECORD_MISSING:{path}",
+                "record_present": False, "authority_verified": False}
     try:
         rec = json.loads(p.read_text())
     except Exception as exc:
-        return {"error": f"OWNER_APPROVAL_RECORD_UNREADABLE:{exc}"}
+        return {"error": f"OWNER_APPROVAL_RECORD_UNREADABLE:{exc}",
+                "record_present": True, "authority_verified": False}
     if rec.get("invocation_id") != INVOCATION_ID:
-        return {"error": "OWNER_APPROVAL_INVOCATION_MISMATCH"}
+        return {"error": "OWNER_APPROVAL_INVOCATION_MISMATCH",
+                "record_present": True, "authority_verified": False}
     if not rec.get("approved_by") or not rec.get("approval_reference"):
-        return {"error": "OWNER_APPROVAL_IDENTITY_INCOMPLETE"}
+        return {"error": "OWNER_APPROVAL_IDENTITY_INCOMPLETE",
+                "record_present": True, "authority_verified": False}
+    if not _registered_owner_authority(rec["approved_by"]):
+        return {"error": "OWNER_APPROVAL_AUTHORITY_UNVERIFIED",
+                "record_present": True, "authority_verified": False}
     return {
         "approval_source": "owner-record",
         "approval_record_path": str(p),
         "approval_record_sha256": digest_bytes(p.read_bytes()),
         "approved_by": rec["approved_by"],
         "approval_reference": rec["approval_reference"],
+        "record_present": True,
+        "authority_verified": True,
         "executor_role": "runner (poc/run_r6i.py) — verification only, "
                          "cannot self-approve",
     }
