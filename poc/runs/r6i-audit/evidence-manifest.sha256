@@ -1,0 +1,10 @@
+sha256:ed930f48970d67275a2841423104aca84f14b7346e32da6067c2ce0aa70cd595  poc/runs/semantic-judge-r6i-approval/owner-approval-r6i.json
+sha256:9575ceb4a1e7a2fba5ecc8b9af7721b73d324a753b21fe9b75367a3c0709bab8  poc/runs/semantic-judge-r6i-g4g7/permit-semjudge-r6i-g4g7.json
+sha256:e707b4636d0342270f4a464b62da021f970bfb1fb7cf1c76059e315163484c61  poc/runs/execution-permit-issuance.jsonl
+sha256:91633df73a2ddcc114c438087784f4be68eedc8dcc71cda929904ac214c7b21b  poc/runs/semantic-judge-r6i-g4g7/r6i-manifest-g4-1802-numeric.json
+sha256:2585d35677cc9f1b4c430442ef02275fb3e5308f422c0419f1a21c28235afa8c  poc/runs/semantic-judge-r6i-g4g7/r6i-manifest-g7-1901-method.json
+sha256:c59070b810c728e0335422563b046bf05b2363abe1e17e2333cd6530b9350ec5  poc/runs/semantic-judge-pilot/semjudge-r6i-g4g7/raw/resp-g4-1802-numeric.json
+sha256:0aa7b50a8d3e22b6b45f09bbfcfb68119f8faa44a9c83dc765814b615fb5a79f  poc/runs/semantic-judge-pilot/semjudge-r6i-g4g7/raw/resp-g7-1901-method.json
+sha256:c0de2ae89b259c36de01964a99c9554531a11bec0769403f666a036c0b5c9766  poc/runs/semantic-judge-r6i-g4g7/budget/model-call-budget-reservations.jsonl
+sha256:f198c5756fabdc52b37612049cb6f3ea5a9cfa5cc58dfba363d78d4352918c4d  poc/runs/semantic-judge-r6i-g4g7/r6i-report.json
+sha256:7a4a8e75be4dd38993fd2ce75061b027e078cf5dbe48efd37871a274dc915f90  poc/runs/semantic-judge-pilot/semjudge-r6i-g4g7/seal-run-dir.json

@@ -1,0 +1,147 @@
+{
+ "audit_id": "r6i-post-execution-evidence-audit",
+ "invocation_id": "semjudge-r6i-g4g7",
+ "base_commit": "f8fc40c",
+ "verdict": "AUDIT_VERIFIED",
+ "zero_model_calls": true,
+ "evidence_files": {
+  "approval_record": {
+   "path": "poc/runs/semantic-judge-r6i-approval/owner-approval-r6i.json",
+   "sha256": "sha256:ed930f48970d67275a2841423104aca84f14b7346e32da6067c2ce0aa70cd595",
+   "exists": true
+  },
+  "permit": {
+   "path": "poc/runs/semantic-judge-r6i-g4g7/permit-semjudge-r6i-g4g7.json",
+   "sha256": "sha256:9575ceb4a1e7a2fba5ecc8b9af7721b73d324a753b21fe9b75367a3c0709bab8",
+   "exists": true
+  },
+  "issuance_ledger": {
+   "path": "poc/runs/execution-permit-issuance.jsonl",
+   "sha256": "sha256:e707b4636d0342270f4a464b62da021f970bfb1fb7cf1c76059e315163484c61",
+   "exists": true
+  },
+  "manifest_g4": {
+   "path": "poc/runs/semantic-judge-r6i-g4g7/r6i-manifest-g4-1802-numeric.json",
+   "sha256": "sha256:91633df73a2ddcc114c438087784f4be68eedc8dcc71cda929904ac214c7b21b",
+   "exists": true
+  },
+  "manifest_g7": {
+   "path": "poc/runs/semantic-judge-r6i-g4g7/r6i-manifest-g7-1901-method.json",
+   "sha256": "sha256:2585d35677cc9f1b4c430442ef02275fb3e5308f422c0419f1a21c28235afa8c",
+   "exists": true
+  },
+  "raw_g4": {
+   "path": "poc/runs/semantic-judge-pilot/semjudge-r6i-g4g7/raw/resp-g4-1802-numeric.json",
+   "sha256": "sha256:c59070b810c728e0335422563b046bf05b2363abe1e17e2333cd6530b9350ec5",
+   "exists": true
+  },
+  "raw_g7": {
+   "path": "poc/runs/semantic-judge-pilot/semjudge-r6i-g4g7/raw/resp-g7-1901-method.json",
+   "sha256": "sha256:0aa7b50a8d3e22b6b45f09bbfcfb68119f8faa44a9c83dc765814b615fb5a79f",
+   "exists": true
+  },
+  "reservation_ledger": {
+   "path": "poc/runs/semantic-judge-r6i-g4g7/budget/model-call-budget-reservations.jsonl",
+   "sha256": "sha256:c0de2ae89b259c36de01964a99c9554531a11bec0769403f666a036c0b5c9766",
+   "exists": true
+  },
+  "adjudication_report": {
+   "path": "poc/runs/semantic-judge-r6i-g4g7/r6i-report.json",
+   "sha256": "sha256:f198c5756fabdc52b37612049cb6f3ea5a9cfa5cc58dfba363d78d4352918c4d",
+   "exists": true
+  },
+  "seal": {
+   "path": "poc/runs/semantic-judge-pilot/semjudge-r6i-g4g7/seal-run-dir.json",
+   "sha256": "sha256:7a4a8e75be4dd38993fd2ce75061b027e078cf5dbe48efd37871a274dc915f90",
+   "exists": true
+  }
+ },
+ "chain_verification": {
+  "approval_record_digest_bound_in_permit": true,
+  "permit_registered_in_issuance_ledger": true,
+  "scope_invocation_papers_match_approval": true,
+  "reservation_ledger": {
+   "reserved_rows": 4,
+   "ceiling": 4,
+   "rows_are_2_runner_plus_2_callpath": true
+  },
+  "budget": {
+   "tokens_total": 4976,
+   "limit": 6000,
+   "within": true,
+   "model_calls": 2,
+   "runner_ordinals": 2
+  },
+  "run_dir_seal_verified": true,
+  "execution_order": "g4 → g7 (sequential, concurrency 1 — execute() iteration order; raw files written in that order)"
+ },
+ "re_adjudication": {
+  "g4-1802-numeric": {
+   "reproduced_result_status": "AGREEMENT",
+   "matches_stored_adjudication": true,
+   "gold_agreement": {
+    "agreement": "Agreement",
+    "gold_expected_direction": "normalized consistency maintained; literal mismatch documented (perturbed lower)",
+    "judge_observed": "A",
+    "disagreement_auto_truth": false
+   }
+  },
+  "g7-1901-method": {
+   "reproduced_result_status": "AGREEMENT",
+   "matches_stored_adjudication": true,
+   "gold_agreement": {
+    "agreement": "Agreement",
+    "gold_expected_direction": "required-info coverage ↓ on P5 (perturbed lower)",
+    "judge_observed": "A",
+    "disagreement_auto_truth": false
+   }
+  }
+ },
+ "re_adjudication_diff_from_stored": "none",
+ "g7_citation_detail": [
+  {
+   "quotation": "TextRank: This is a statistical method originally designed for keyword extraction and ranking.",
+   "source_side": "ev_a",
+   "source_note": "note-original",
+   "corresponding_passage": "(USE).\n\n* TextRank: This is a statistical method originally designed for keyword extraction and ranking. In the co",
+   "byte_exact": false,
+   "markdown_normalized_match": true,
+   "other_content_changes": false
+  },
+  {
+   "quotation": "The first algorithmic step involves extracting keywords from the input document using the TextRank algorithm.",
+   "source_side": "ev_a",
+   "source_note": "note-original",
+   "corresponding_passage": "Centroids\nThe first algorithmic step involves extracting keywords from the input document using the TextRank algorithm. These ext",
+   "byte_exact": false,
+   "markdown_normalized_match": true,
+   "other_content_changes": false
+  },
+  {
+   "quotation": "The paper explicitly identifies two specific algorithms as the central components of its solution: TextRank and Google’s Universal Sentence Encoder (USE).",
+   "source_side": "ev_b",
+   "source_note": "perturbed-note",
+   "corresponding_passage": "The paper explicitly identifies two specific algorithms as the central components of its solution: TextRank and Google’s Universal Sentence Encoder (USE).\n\n* Univer",
+   "byte_exact": false,
+   "markdown_normalized_match": true,
+   "other_content_changes": false
+  },
+  {
+   "quotation": "The combination of these two methods suggests a hybrid approach: TextRank likely handles the statistical weighting of terms",
+   "source_side": "ev_b",
+   "source_note": "perturbed-note",
+   "corresponding_passage": "eywords.\n\nThe combination of these two methods suggests a hybrid approach: TextRank likely handles the statistical weighting of terms, while US",
+   "byte_exact": true,
+   "markdown_normalized_match": true,
+   "other_content_changes": false
+  }
+ ],
+ "citation_summary": {
+  "byte_exact": 1,
+  "markdown_normalized": 4,
+  "other_content_changes": 0,
+  "stored_byte_exact_results_not_overwritten": "citation_accuracy fields in r6i-report.json untouched; detail recorded here only"
+ },
+ "sensitive_info_excluded": true,
+ "audited_at": "2026-10-29T07:13:22Z"
+}
