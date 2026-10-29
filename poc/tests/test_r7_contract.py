@@ -712,7 +712,8 @@ def _eval_scenario(extra=" TextRank supplies the keyword centroids."):
     rec = review_record(digests={"orig": sha256(ORIGINAL),
                                  "pert": sha256(pert),
                                  "source": sha256(SOURCE)},
-                        reviewer_id="static-fixture-reviewer")
+                        reviewer_id="static-fixture-reviewer",
+                        verification_context="EVALUATION")
     return pert, docs, anchors, rec
 
 
@@ -723,7 +724,10 @@ def _residual_reviews(manifest, verdict, reviewer="static-fixture-reviewer"):
              "reviewer_id": reviewer,
              "rationale": "equivalence judged per the claim's "
                           "information unit",
-             "review_evidence_refs": []} for loc in manifest}
+             "review_evidence_refs": [{
+                 "document_id": loc["document_id"],
+                 "document_digest": loc["document_digest"],
+                 "locator": loc["locator"]}]} for loc in manifest}
 
 
 def test_D2B_T06_partial_residual_review_pending():
@@ -746,6 +750,9 @@ def test_D2B_T06_partial_residual_review_pending():
 
 
 def test_D2B_T07_full_residual_review_conditional_verified():
+    # policy update (D2C-B2): even a fully reviewed, non-equivalent
+    # residual under EVALUATION cannot reach VERIFIED while operating
+    # governance is NOT READY — the gate downgrades to PENDING
     pert, docs, anchors, rec = _eval_scenario()
     r = loss_call(perturbed_note=pert, documents=docs,
                   human_review_record=rec, context="EVALUATION",
@@ -755,7 +762,9 @@ def test_D2B_T07_full_residual_review_conditional_verified():
                    human_review_record=rec, context="EVALUATION",
                    evaluation_request=True, residual_reviews=reviews,
                    **anchors)
-    assert r2["verification_status"] == "VERIFIED"
+    assert r2["verification_status"] == "PENDING_HUMAN_REVIEW"
+    assert r2["record"]["gate_reason"] == "REVIEWER_GOVERNANCE_NOT_READY"
+    assert r2["record"]["evaluation_eligible"] is False
 
 
 def test_D2B_T08_semantic_equivalent_elsewhere_failed():
@@ -794,25 +803,36 @@ def test_D2B_T09_partial_loss_term_residual_verified():
 
 
 def test_D2B_T10_residual_manifest_digest_mismatch_detected():
-    # manifest computed against a registry missing the document carries
-    # a digest that can never match the probed text — reuse is blocked
-    m = build_residual_manifest(claim_id="c-x", document_id="pert",
+    # policy update (D2C-C4): a manifest from mismatched document
+    # versions is NO LONGER produced — the builder raises instead;
+    # the wrong-digest artifact can therefore never be returned as a
+    # normal result
+    with pytest.raises(Exception) as ei:
+        build_residual_manifest(claim_id="c-x", document_id="pert",
                                 documents={}, perturbed_note=PERTURBED,
                                 keywords=["captions"])
-    assert m
-    assert all(loc["document_digest"] != sha256(PERTURBED) for loc in m)
-    # version-change rule: a manifest computed against registry text X
-    # can never be reused for a different probed text — the digest
-    # binding makes the mismatch mechanically detectable
-    m2 = build_residual_manifest(claim_id="c-y", document_id="pert",
-                                 documents=DOCS,  # registry = PERTURBED
-                                 perturbed_note=PERTURBED.replace(
-                                     "12,000", "13,000"),
-                                 keywords=["captions"])
-    assert all(loc["document_digest"] != sha256(DOCS["pert"]) or True
-               for loc in m2)
-    assert any(loc["document_digest"] != sha256(
-        PERTURBED.replace("12,000", "13,000")) for loc in m2)
+    assert "RESIDUAL_MANIFEST_DOCUMENT_BINDING_FAILED" in str(ei.value)
+    # and the verifier reflects the manifest failure in the FINAL state
+    d2b_eval_reviewer()
+    docs2 = dict(DOCS, pert=PERTURBED.replace("12,000", "13,000"))
+    anchors = dict(LOSS_ANCHORS,
+                   absence_evidence=d("pert", docs2["pert"],
+                                      "perturbed_note",
+                                      "Captions average 30.7 characters "
+                                      "in length,"))
+    rec = review_record(digests={"orig": sha256(ORIGINAL),
+                                 "pert": docs2["pert"],
+                                 "source": sha256(SOURCE)},
+                        reviewer_id="static-fixture-reviewer",
+                        verification_context="EVALUATION")
+    r = verify_info_loss(claim_id="c-loss-1", documents=docs2,
+                         original_note=ORIGINAL,
+                         perturbed_note=PERTURBED,  # mismatched version
+                         source_paper=SOURCE, **anchors,
+                         human_review_record=rec, context="EVALUATION",
+                         evaluation_request=True)
+    assert r["manifest_error"] or \
+        r["verification_status"] == "FAILED"
 
 
 def test_D2B_T11_reader_note_missing_dataset_ready_forbidden():
@@ -855,3 +875,261 @@ def test_D2B_T14_no_permit_not_e1_admitted():
     assert r["readiness_states"]["E1_ADMITTED"] is False
     assert r["token_budget"]["provisional_cap"]["class"].startswith(
         "provisional")
+
+
+# ==================== §D2C regression tests (T01–T16) =======================
+def test_D2C_T01_test_record_to_evaluation_blocked():
+    rec = review_record()  # TEST-fixture record, no context field
+    r = loss_call(human_review_record=rec, context="EVALUATION",
+                  evaluation_request=True)
+    assert r["verification_status"] != "VERIFIED"
+    assert r["record"]["evaluation_eligible"] is False
+
+
+def test_D2C_T02_evaluation_record_to_test_blocked():
+    rec = review_record(verification_context="EVALUATION")
+    r = loss_call(human_review_record=rec)  # TEST request
+    assert r["verification_status"] != "VERIFIED"
+    assert any("CONTEXT_BINDING_FAILED" in p
+               for p in r["review_record_validation"]["problems"])
+
+
+def test_D2C_T03_missing_context_evaluation_blocked():
+    rec = review_record()  # no context field
+    r = loss_call(human_review_record=rec, context="EVALUATION",
+                  evaluation_request=True)
+    assert r["verification_status"] != "VERIFIED"
+    assert any("MISSING_RECORD_CONTEXT" in p
+               for p in r["review_record_validation"]["problems"])
+
+
+def test_D2C_T04_context_flip_invalidates_record_digest():
+    rec = review_record(verification_context="TEST")  # digested as TEST
+    flipped = dict(rec, verification_context="EVALUATION")
+    v = validate_human_review(flipped, claim_id="c-loss-1", documents=DOCS,
+                              anchor_doc_ids=["orig", "pert", "source"])
+    assert "REVIEW_RECORD_DIGEST_INVALID" in v["problems"]
+
+
+def test_D2C_T05_non_synthetic_registered_evaluation_denied():
+    # static-fixture non-synthetic REGISTERED reviewer, valid record:
+    # still denied — governance gate
+    pert, docs, anchors, rec = _eval_scenario()
+    reviews = _residual_reviews(
+        loss_call(perturbed_note=pert, documents=docs,
+                  human_review_record=rec, context="EVALUATION",
+                  evaluation_request=True, **anchors)["residual_manifest"],
+        "NOT_EQUIVALENT")
+    r2 = loss_call(perturbed_note=pert, documents=docs,
+                   human_review_record=rec, context="EVALUATION",
+                   evaluation_request=True, residual_reviews=reviews,
+                   **anchors)
+    assert r2["verification_status"] != "VERIFIED"
+    assert r2["record"]["gate_reason"] == "REVIEWER_GOVERNANCE_NOT_READY"
+
+
+def test_D2C_T06_approved_memory_reviewer_evaluation_denied():
+    # memory reviewer with owner-approval-looking fields still denied
+    register_reviewer("mem-approv", "REGISTERED", synthetic=False,
+                      approved_by="owner-x", approved_at="2026-10-29")
+    rec = review_record(reviewer_id="mem-approv",
+                        verification_context="EVALUATION")
+    rec = finalize_review_record(rec)
+    r = loss_call(human_review_record=rec, context="EVALUATION",
+                  evaluation_request=True)
+    assert r["verification_status"] != "VERIFIED"
+    assert r["record"]["governance_state"] == "REVIEWER_GOVERNANCE_NOT_READY"
+
+
+def test_D2C_T07_invalid_review_status_never_verified():
+    d2b_eval_reviewer()
+    pert, docs, anchors, rec = _eval_scenario()
+    r = loss_call(perturbed_note=pert, documents=docs,
+                  human_review_record=rec, context="EVALUATION",
+                  evaluation_request=True, **anchors)
+    rv = _residual_reviews([r["residual_manifest"][0]],
+                           "NOT_EQUIVALENT")
+    first = r["residual_manifest"][0]["location_id"]
+    reviews = dict(rv, **{first: dict(rv[first],
+                                      review_status="MAYBE")})
+    r2 = loss_call(perturbed_note=pert, documents=docs,
+                   human_review_record=rec, context="EVALUATION",
+                   evaluation_request=True, residual_reviews=reviews,
+                   **anchors)
+    assert r2["verification_status"] != "VERIFIED"
+
+
+def test_D2C_T08_invalid_verdict_never_verified():
+    d2b_eval_reviewer()
+    pert, docs, anchors, rec = _eval_scenario()
+    r = loss_call(perturbed_note=pert, documents=docs,
+                  human_review_record=rec, context="EVALUATION",
+                  evaluation_request=True, **anchors)
+    reviews = _residual_reviews([r["residual_manifest"][0]],
+                                "SORT_OF_EQUIVALENT")
+    r2 = loss_call(perturbed_note=pert, documents=docs,
+                   human_review_record=rec, context="EVALUATION",
+                   evaluation_request=True, residual_reviews=reviews,
+                   **anchors)
+    assert r2["verification_status"] != "VERIFIED"
+
+
+def test_D2C_T09_residual_reviewer_mismatch_pending():
+    d2b_eval_reviewer()
+    pert, docs, anchors, rec = _eval_scenario()
+    r = loss_call(perturbed_note=pert, documents=docs,
+                  human_review_record=rec, context="EVALUATION",
+                  evaluation_request=True, **anchors)
+    reviews = _residual_reviews(r["residual_manifest"], "NOT_EQUIVALENT",
+                                reviewer="some-other-reviewer")
+    r2 = loss_call(perturbed_note=pert, documents=docs,
+                   human_review_record=rec, context="EVALUATION",
+                   evaluation_request=True, residual_reviews=reviews,
+                   **anchors)
+    assert r2["verification_status"] == "PENDING_HUMAN_REVIEW"
+
+
+def test_D2C_T10_residual_evidence_digest_mismatch_failed():
+    d2b_eval_reviewer()
+    pert, docs, anchors, rec = _eval_scenario()
+    r = loss_call(perturbed_note=pert, documents=docs,
+                  human_review_record=rec, context="EVALUATION",
+                  evaluation_request=True, **anchors)
+    reviews = _residual_reviews(r["residual_manifest"], "NOT_EQUIVALENT")
+    loc = r["residual_manifest"][0]["location_id"]
+    reviews[loc]["review_evidence_refs"][0]["document_digest"] = \
+        "sha256:other-version"
+    r2 = loss_call(perturbed_note=pert, documents=docs,
+                   human_review_record=rec, context="EVALUATION",
+                   evaluation_request=True, residual_reviews=reviews,
+                   **anchors)
+    assert r2["verification_status"] in ("PENDING_HUMAN_REVIEW", "FAILED")
+
+
+def test_D2C_T11_partially_unreviewed_locations_pending():
+    d2b_eval_reviewer()
+    pert, docs, anchors, rec = _eval_scenario(
+        " Captions carry keywords. TextRank supplies the keyword "
+        "centroids.")
+    r = loss_call(perturbed_note=pert, documents=docs,
+                  human_review_record=rec, context="EVALUATION",
+                  evaluation_request=True, **anchors)
+    assert len(r["residual_manifest"]) >= 2
+    reviews = _residual_reviews([r["residual_manifest"][0]],
+                                "NOT_EQUIVALENT")
+    r2 = loss_call(perturbed_note=pert, documents=docs,
+                   human_review_record=rec, context="EVALUATION",
+                   evaluation_request=True, residual_reviews=reviews,
+                   **anchors)
+    assert r2["verification_status"] == "PENDING_HUMAN_REVIEW"
+
+
+def test_D2C_T12_manifest_document_version_mismatch_failed():
+    # registry version differs from the probed text — the manifest is
+    # refused (binding failure reaches the FINAL state, FAILED)
+    docs2 = dict(DOCS, pert=PERTURBED.replace("12,000", "13,000"))
+    anchors = dict(LOSS_ANCHORS,
+                   absence_evidence=d("pert", docs2["pert"],
+                                      "perturbed_note",
+                                      "Captions average 30.7 characters "
+                                      "in length,"))
+    rec = review_record(digests={"orig": sha256(ORIGINAL),
+                                 "pert": docs2["pert"],
+                                 "source": sha256(SOURCE)},
+                        reviewer_id="static-fixture-reviewer",
+                        verification_context="TEST")
+    r = verify_info_loss(claim_id="c-loss-1", documents=docs2,
+                         original_note=ORIGINAL, perturbed_note=PERTURBED,
+                         source_paper=SOURCE, **anchors,
+                         human_review_record=rec)
+    assert r["manifest_error"] == "RESIDUAL_MANIFEST_DOCUMENT_BINDING_FAILED"
+    assert r["verification_status"] == "FAILED"
+
+
+def test_D2C_T13_full_review_test_context_verified():
+    # TEST context: full review + non-equivalent residual ⇒ VERIFIED
+    # possible (synthetic fixture reviewer, static test only)
+    d2b_eval_reviewer()
+    pert = PERTURBED + " TextRank supplies the keyword centroids."
+    docs = dict(DOCS, pert=pert)
+    anchors = dict(LOSS_ANCHORS,
+                   absence_evidence=d("pert", pert, "perturbed_note",
+                                      "Captions average 30.7 characters "
+                                      "in length,"))
+    rec = review_record(digests={"orig": sha256(ORIGINAL),
+                                 "pert": sha256(pert),
+                                 "source": sha256(SOURCE)})
+    r = loss_call(perturbed_note=pert, documents=docs,
+                  human_review_record=rec, context="TEST",
+                  evaluation_request=False, **anchors)
+    reviews = _residual_reviews(r["residual_manifest"], "NOT_EQUIVALENT",
+                                reviewer=SYNTHETIC_REVIEWER)
+    r2 = loss_call(perturbed_note=pert, documents=docs,
+                   human_review_record=rec, context="TEST",
+                   residual_reviews=reviews, **anchors)
+    assert r2["verification_status"] == "VERIFIED"
+
+
+def test_D2C_T14_same_case_evaluation_blocked_by_governance():
+    # identical scenario as T13 but under EVALUATION ⇒ blocked
+    d2b_eval_reviewer()
+    pert, docs, anchors, rec = _eval_scenario(
+        " TextRank supplies the keyword centroids.")
+    r = loss_call(perturbed_note=pert, documents=docs,
+                  human_review_record=rec, context="EVALUATION",
+                  evaluation_request=True, **anchors)
+    reviews = _residual_reviews(r["residual_manifest"], "NOT_EQUIVALENT")
+    r2 = loss_call(perturbed_note=pert, documents=docs,
+                   human_review_record=rec, context="EVALUATION",
+                   evaluation_request=True, residual_reviews=reviews,
+                   **anchors)
+    assert r2["verification_status"] != "VERIFIED"
+    assert r2["record"]["gate_reason"] == "REVIEWER_GOVERNANCE_NOT_READY"
+
+
+def test_D2C_T15_no_permit_not_e1_admitted():
+    r = json.load(open(RRSI_ROOT / "poc/runs/r7-evaluation/"
+                       "admission-readiness-r2.json"))
+    assert r["readiness_states"]["E1_ADMITTED"] is False
+    assert r["contract_vs_execution"]["r7_e1_execution_permit"][
+        "status"] == "NOT_GRANTED"
+
+
+def test_D2C_T16_contract_reuse_alone_not_e1_admitted():
+    r = json.load(open(RRSI_ROOT / "poc/runs/r7-evaluation/"
+                       "admission-readiness-r2.json"))
+    assert r["contract_vs_execution"][
+        "contract_reuse_authorization"] is not None
+    assert r["readiness_states"]["E1_ADMITTED"] is False
+
+
+def test_D2C_invariant_evaluation_never_verified():
+    """§D2C invariant — for every EVALUATION request (normal and
+    abnormal inputs): governance not ready ⇒ status != VERIFIED and
+    evaluation_eligible == False."""
+    d2b_eval_reviewer()
+    pert, docs, anchors, rec = _eval_scenario()
+    cases = [
+        {},  # no record
+        dict(rec),  # normal, fully reviewed below
+        dict(rec, review_record_digest="sha256:bogus"),
+        dict(rec, global_absence_verdict="REFUTED"),
+        dict(rec, reviewed_document_digests={"orig": "sha256:x"}),
+    ]
+    # fully-reviewed residual reviews for the normal case
+    r0 = loss_call(perturbed_note=pert, documents=docs,
+                   human_review_record=rec, context="EVALUATION",
+                   evaluation_request=True, **anchors)
+    reviews = _residual_reviews(r0["residual_manifest"], "NOT_EQUIVALENT")
+    for i, hr in enumerate(cases):
+        r = loss_call(perturbed_note=pert, documents=docs,
+                      human_review_record=hr, context="EVALUATION",
+                      evaluation_request=True,
+                      residual_reviews=reviews if i == 1 else None,
+                      **anchors)
+        assert r["verification_status"] != "VERIFIED", i
+        assert r["record"]["evaluation_eligible"] is False, i
+        assert not r["record"]["context_binding"][
+            "evaluation_eligible"], i
+        assert r["record"]["governance_state"] == \
+            "REVIEWER_GOVERNANCE_NOT_READY", i

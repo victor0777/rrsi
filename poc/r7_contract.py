@@ -368,7 +368,8 @@ def _review_scope_sufficient(record) -> bool:
 
 
 def validate_human_review(record, *, claim_id: str, documents: dict,
-                          anchor_doc_ids: list) -> dict:
+                          anchor_doc_ids: list,
+                          request_context=None) -> dict:
     """§D2A.1-C1/C2 — provenance-hardened Human Review Record
     validation (11 v2 fields; legacy `document_digests` alias accepted
     per compatibility policy). All mandatory: review id, reviewer id,
@@ -447,7 +448,22 @@ def validate_human_review(record, *, claim_id: str, documents: dict,
     ctx = record.get("verification_context")
     if ctx not in (None, "") and ctx not in VERIFICATION_CONTEXTS:
         problems.append("UNKNOWN_VERIFICATION_CONTEXT")
-    return {"valid": not problems, "problems": problems}
+    # §D2C-A1 — context binding: the record context must EQUAL the
+    # request context. TEST records can never be reused under
+    # EVALUATION (and vice versa). A missing context blocks EVALUATION;
+    # under TEST it is tolerated ONLY for legacy synthetic fixtures.
+    if request_context == "EVALUATION":
+        if ctx in (None, ""):
+            problems.append("CONTEXT_BINDING_FAILED:MISSING_RECORD_CONTEXT")
+        elif ctx != request_context:
+            problems.append("CONTEXT_BINDING_FAILED:" + ctx + "->" +
+                            request_context)
+    elif request_context == "TEST" and ctx not in (None, "") and \
+            ctx != request_context:
+        problems.append("CONTEXT_BINDING_FAILED:" + ctx + "->" +
+                        request_context)
+    return {"valid": not problems, "problems": problems,
+            "record_context": ctx}
 
 
 def resolve_claim_evidence(claim: dict, judge_evidence_refs: dict,
@@ -486,6 +502,11 @@ def build_residual_manifest(*, claim_id: str, document_id: str,
     detectable and never reused."""
     manifest = []
     seen = set()
+    if document_id not in documents or documents[document_id] != \
+            perturbed_note:
+        # §D2C-C4 — refuse to build a manifest from mismatched versions
+        raise ResidualManifestError(
+            "RESIDUAL_MANIFEST_DOCUMENT_BINDING_FAILED")
     for k in keywords:
         for m in re.finditer(r"\b" + re.escape(k) + r"\b",
                              perturbed_note, re.IGNORECASE):
@@ -507,21 +528,59 @@ def build_residual_manifest(*, claim_id: str, document_id: str,
     return manifest
 
 
-def _residual_review_status(manifest: list, residual_reviews: dict | None) \
-        -> str:
-    """§D2B-D3 — location-level decision. All locations reviewed, no
-    semantic equivalent found (per the claim's information unit) ⇒ VERIFIED
-    eligible; any EQUIVALENT ⇒ FAILED (full-loss claim refuted); any
-    NOT_REVIEWED / UNCERTAIN / INSUFFICIENT_EVIDENCE ⇒ PENDING."""
+def _residual_review_status(manifest: list, residual_reviews: dict | None,
+                            record_reviewer: str | None = None) -> str:
+    """§D2B-D3 + §D2C-C — strict location-level decision.
+    Schema: every review MUST carry all six fields with allowed values;
+    reviewer_id MUST equal the Human Review Record's reviewer (a second
+    reviewer needs a separate Review Record); evidence refs MUST be
+    non-empty and bind to the actual manifest location (document_id /
+    digest / locator). Unknown values, missing fields, empty rationale
+    or evidence, and unregistered location ids never resolve to
+    VERIFIED. Priority: schema/evidence mismatch ⇒ FAILED (version
+    change), reviewer binding / unreviewed / uncertain ⇒ PENDING."""
     if not residual_reviews:
         return "PENDING_HUMAN_REVIEW"
+    REVIEW_FIELDS = ("reviewer_id", "review_status",
+                     "semantic_equivalence_verdict", "rationale",
+                     "review_evidence_refs")
+    manifest_ids = {loc["location_id"] for loc in manifest}
     statuses, verdicts = [], []
     for loc in manifest:
         rv = residual_reviews.get(loc["location_id"])
         if not isinstance(rv, dict):
             return "PENDING_HUMAN_REVIEW"  # every location must be reviewed
-        statuses.append(rv.get("review_status"))
-        verdicts.append(rv.get("semantic_equivalence_verdict"))
+        if rv.get("location_id") is not None and \
+                rv["location_id"] not in manifest_ids:
+            return "FAILED"  # unregistered location id in review input
+        for field in REVIEW_FIELDS:
+            if field not in rv or rv[field] in (None, ""):
+                return "PENDING_HUMAN_REVIEW"  # schema error
+        if rv["review_status"] not in ("REVIEWED", "NOT_REVIEWED",
+                                       "INSUFFICIENT_EVIDENCE"):
+            return "PENDING_HUMAN_REVIEW"  # unknown status value
+        if rv["semantic_equivalence_verdict"] not in (
+                "EQUIVALENT", "NOT_EQUIVALENT", "UNCERTAIN"):
+            return "PENDING_HUMAN_REVIEW"  # unknown verdict value
+        if not isinstance(rv["rationale"], str) or \
+                len(rv["rationale"]) < 10:
+            return "PENDING_HUMAN_REVIEW"  # empty/insufficient rationale
+        refs = rv["review_evidence_refs"]
+        if not isinstance(refs, list) or not refs:
+            return "PENDING_HUMAN_REVIEW"  # empty evidence
+        for ref in refs:
+            if not isinstance(ref, dict):
+                return "PENDING_HUMAN_REVIEW"
+            if (ref.get("document_id") != loc["document_id"] or
+                    ref.get("document_digest") != loc["document_digest"] or
+                    ref.get("locator") != loc["locator"]):
+                # evidence bound to another document version ⇒ FAIL
+                return "FAILED"
+        # reviewer binding: a different reviewer is not silently merged
+        if record_reviewer and rv["reviewer_id"] != record_reviewer:
+            return "PENDING_HUMAN_REVIEW"
+        statuses.append(rv["review_status"])
+        verdicts.append(rv["semantic_equivalence_verdict"])
     if any(s in (None, "NOT_REVIEWED", "INSUFFICIENT_EVIDENCE")
            for s in statuses):
         return "PENDING_HUMAN_REVIEW"
@@ -530,6 +589,41 @@ def _residual_review_status(manifest: list, residual_reviews: dict | None) \
     if "UNCERTAIN" in verdicts:
         return "PENDING_HUMAN_REVIEW"
     return "VERIFIED"
+
+
+# §D2C-B — Reviewer Governance readiness. The in-memory registry is a
+# TEST scaffold only; until the operating registry + Owner approval
+# evidence exist, EVALUATION promotion is fail-closed.
+REVIEWER_GOVERNANCE_NOT_READY = "REVIEWER_GOVERNANCE_NOT_READY"
+GOVERNANCE_READY_EVIDENCE_CONTRACT = {
+    "required_evidence": (
+        "persistent_reviewer_registry",      # 1
+        "registry_version_and_digest",       # 2
+        "owner_approval_record",             # 3
+        "reviewer_identity_binding",         # 4
+        "approval_and_revocation_history",   # 5
+        "review_record_to_registry_snapshot_binding",  # 6
+        "approved_evaluation_permit",        # 7
+    ),
+    "policy": "readiness is NEVER a plain boolean flag; each evidence "
+              "item must be verifiable against sealed artifacts",
+    "activation": "NOT implemented in this stage — contract only",
+}
+_REGISTRY_TYPE = "in_memory_test_scaffold"
+
+
+def reviewer_governance_ready(*args, **kwargs) -> bool:
+    """§D2C-B3 — always False in this stage: operating governance
+    activation is deliberately NOT implemented. Any future
+    implementation must verify the evidence contract above, not a
+    boolean flag."""
+    return False
+
+
+class ResidualManifestError(Exception):
+    """§D2C-C4 — raised when the manifest's document binding fails
+    (documents[document_id] != perturbed_note); a manifest is never
+    produced from mismatched document versions."""
 
 
 def verify_info_loss(*, claim_id: str, original_note_anchor: dict,
@@ -597,26 +691,35 @@ def verify_info_loss(*, claim_id: str, original_note_anchor: dict,
     statuses = [ev_original["verification_status"],
                 ev_absence["verification_status"],
                 ev_importance["verification_status"]]
+    ctx_res = resolve_verification_context(context, evaluation_request)
     review = validate_human_review(
         human_review_record, claim_id=claim_id, documents=documents,
         anchor_doc_ids=[original_note_anchor["document_id"],
                         absence_evidence["document_id"],
-                        source_importance["document_id"]])
+                        source_importance["document_id"]],
+        request_context=ctx_res["context"] if ctx_res["allowed"] else None)
     record_reviewer = (human_review_record or {}).get("reviewer_id") \
         if isinstance(human_review_record, dict) else None
     reviewer_entry = _REVIEWER_REGISTRY.get(record_reviewer) if \
         record_reviewer else None
-    ctx_res = resolve_verification_context(context, evaluation_request)
-    residual_manifest = build_residual_manifest(
-        claim_id=claim_id,
-        document_id=absence_evidence.get("document_id", ""),
-        documents=documents, perturbed_note=perturbed_note,
-        keywords=keywords)
+    manifest_error = None
+    try:
+        residual_manifest = build_residual_manifest(
+            claim_id=claim_id,
+            document_id=absence_evidence.get("document_id", ""),
+            documents=documents, perturbed_note=perturbed_note,
+            keywords=keywords)
+    except ResidualManifestError as exc:
+        residual_manifest = []
+        manifest_error = str(exc)
     for loc in residual_manifest:
         if loc["document_digest"] != sha256(perturbed_note):
             review["problems"].append("RESIDUAL_MANIFEST_DIGEST_MISMATCH:" +
                                       loc["location_id"])
-    if "FAILED" in statuses or binding_problems or \
+    if manifest_error:
+        # §D2C-C4 — manifest binding failure MUST reach the final state
+        status = "FAILED"
+    elif "FAILED" in statuses or binding_problems or \
             any(r["problems"] for r in
                 (ev_original, ev_absence, ev_importance)):
         status = "FAILED"
@@ -645,13 +748,27 @@ def verify_info_loss(*, claim_id: str, original_note_anchor: dict,
                 # §D2B-D3 — location-level review required: the boolean
                 # flag alone is insufficient in EVALUATION
                 status = _residual_review_status(residual_manifest,
-                                                 residual_reviews)
+                                                 residual_reviews,
+                                                 record_reviewer)
             else:
                 status = "VERIFIED"  # TEST-only legacy boolean path
         else:
             status = "VERIFIED"
     else:
         status = "PENDING_HUMAN_REVIEW"
+    gate_reason = None
+    if status == "VERIFIED" and ctx_res["context"] == "EVALUATION" and \
+            not reviewer_governance_ready():
+        # §D2C-B2 — governance fail-closed: even non-synthetic
+        # REGISTERED reviewers with owner-approval fields and a valid
+        # record digest cannot promote an EVALUATION claim while the
+        # operating governance is not ready.
+        status = "PENDING_HUMAN_REVIEW"
+        evaluation_eligible = False
+        gate_reason = REVIEWER_GOVERNANCE_NOT_READY
+    else:
+        evaluation_eligible = (status == "VERIFIED" and
+                               ctx_res["context"] == "EVALUATION")
     return {
         "claim_id": claim_id,
         "evidence_original_note": ev_original,
@@ -673,13 +790,27 @@ def verify_info_loss(*, claim_id: str, original_note_anchor: dict,
         "review_record_validation": review,
         "verification_status": status,
         "blocked": ctx_res["blocked"],
+        "manifest_error": manifest_error,
         "residual_manifest": residual_manifest,
         "record": {"claim_id": claim_id,
                    "verification_context": ctx_res["context"],
                    "context_reason": ctx_res["reason"],
-                   "evaluation_eligible": ctx_res["context"] == "EVALUATION"
-                                          and not ctx_res["blocked"]
-                                          and status == "VERIFIED",
+                   "context_binding": {
+                       "request_context": ctx_res["context"],
+                       "record_context": review.get("record_context"),
+                       "binding_result": "FAILED" if any(
+                           p.startswith("CONTEXT_BINDING_FAILED")
+                           for p in review["problems"]) else "OK",
+                       "failure_reason": next(
+                           (p for p in review["problems"] if
+                            p.startswith("CONTEXT_BINDING_FAILED")), None),
+                       "evaluation_eligible": evaluation_eligible},
+                   "evaluation_eligible": evaluation_eligible,
+                   "gate_reason": gate_reason,
+                   "registry_type": _REGISTRY_TYPE,
+                   "registry_version": registry_version(),
+                   "registry_digest": registry_digest(),
+                   "governance_state": REVIEWER_GOVERNANCE_NOT_READY,
                    "reviewer_registry_version": registry_version(),
                    "reviewer_registry_digest": registry_digest(),
                    "scope_digest": {"original_note": sha256(original_note),
