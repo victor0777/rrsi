@@ -183,6 +183,10 @@ G7_EXCLUSIONS = {
                                  "Data Composition is included"),
     "orphan_headings_markers": ("bare '_source:' / section-heading lines "
                                 "with no methodology content"),
+    "bare_heading_paragraphs": ("paragraphs consisting of only a '###' "
+                                "heading line carry no methodology content; "
+                                "section bodies carry it (identical rule on "
+                                "both sides)"),
 }
 
 G7_INCLUSION_REGEX = "|".join(G7_CATEGORIES.values())
@@ -192,6 +196,7 @@ G7_EXCLUSION_REGEX = (r"^\s*(\*\*)?\s*남은 의존성"
                       r"|^\s*_source:"
                       r"|^\s*### Hypothesis on Combined Similarity"
                       r"|^\s*### Overview and Input Processing"
+                      r"|^\s*### [^\n]*$"
                       r"|^\s*The proposed approach is tested on")
 
 
@@ -211,10 +216,23 @@ def g7_select(text: str) -> dict:
 
 
 def render_v2_user_prompt(pair: dict) -> str:
-    return (f"Evaluation dimension: {pair['dimension']}\n\n"
-            f"--- Document A ---\n{pair['A']}\n\n"
-            f"--- Document B ---\n{pair['B']}\n\n"
-            + V2_TEMPLATE)
+    prompt = (f"Evaluation dimension: {pair['dimension']}\n\n"
+              f"--- Document A ---\n{pair['A']}\n\n"
+              f"--- Document B ---\n{pair['B']}\n\n"
+              + V2_TEMPLATE)
+    # Review fix (ONE FIX BEFORE GO): the judge cannot invent registry keys —
+    # the claim-item catalog is included ONLY for the g7 dimension; the g4
+    # prompt carries no g7 items.
+    if pair["dimension"] == "Partial Required Information Coverage Loss":
+        item_catalog = "\n".join(
+            f"- {key}: {description}"
+            for key, (description, _) in G7_CLAIM_ITEMS.items())
+        prompt += ("\nAllowed missing-item keys:\n" + item_catalog +
+                   "\nIf claiming information loss, list only the specific "
+                   "missing items. Do not claim that an entire methodology "
+                   "is absent when only one functional explanation is "
+                   "missing.")
+    return prompt
 
 
 # ------------------------------------------------------------- §A record ----
