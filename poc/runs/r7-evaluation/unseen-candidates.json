@@ -1,0 +1,532 @@
+{
+ "schema": "r7-separation-proof/v0.2",
+ "development_paper_ids": [
+  "1802.07862",
+  "1901.10133"
+ ],
+ "unseen_candidate_paper_ids": [
+  "1704.06194",
+  "1801.05147",
+  "1809.04267",
+  "1810.08699",
+  "1909.08089",
+  "1912.01214",
+  "1912.04961",
+  "2004.03354"
+ ],
+ "excluded_papers": [
+  {
+   "paper_id": "1911.06964",
+   "judgement": "EXPOSED",
+   "evidence": "qa fixture sets reference this paper (research_benchmarks/benchmarks/qasper/fixture/final/{gold.json,cases.jsonl,manifest.json}) — used in prior QA experiments"
+  },
+  {
+   "paper_id": "1808.09111",
+   "judgement": "EXPOSED",
+   "evidence": "qa fixture dev set (research_benchmarks/benchmarks/qasper/fixture/dev/) — used in prior QA experiments"
+  }
+ ],
+ "id_intersection": [],
+ "intersection_empty": true,
+ "version_lineage_check": "candidates share no arXiv base id or version with Development papers",
+ "evolve_holdout_consumption": "none — BLOCKED_CONFLICTED 13, EVOLVE 2, Final Holdout untouched",
+ "challenge_layer": "built ONLY over Unseen candidate papers",
+ "four_axis_matrix": [
+  {
+   "paper_id": "1912.01214",
+   "version": "v1",
+   "chars": 25990,
+   "topic": "transfer learning, language pairs",
+   "title_hint": "Transfer learning between different language pairs",
+   "full_text_chars": 25990,
+   "full_text_digest": "sha256:e0e8bd308f2b6b53ee1c35a8e9d9e8123316b3cd8079e7f547f7724b5af6ab5c",
+   "source_available": true,
+   "existing_reader_note": false,
+   "locator_support": "paragraph-level via flattened full_text; sentence-level derivable",
+   "est_input_tokens_lower_bound": 6497,
+   "four_axis_checks": [
+    {
+     "axis": "id_version_overlap",
+     "finding": "no hits in Development ids 1802.07862/1901.10133 or versions",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "ai_papers_note_history",
+     "finding": "no hits in ai_papers/docs/eval/reader-note-quality (15 GT) or data/runs sweeps",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "judge_prompt_dev_exposure",
+     "finding": "no hits in rrsi poc/runs outside the frozen dataset file itself",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "gold_perturbation_design_overlap",
+     "finding": "no hits in review-packets*, perturbation-audit sources",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    }
+   ],
+   "caveat": "no structured exposure evidence found in swept registries; evidence absence is NOT proof of non-exposure — coverage bounded by swept locations",
+   "status": "UNSEEN_CANDIDATE",
+   "est_note": "char/4 lower-bound is an ESTIMATE; no Reader Note exists, no measured tokens"
+  },
+  {
+   "paper_id": "1810.08699",
+   "version": "v1",
+   "chars": 17939,
+   "topic": "Armenian NER",
+   "title_hint": "Ner for armenian",
+   "full_text_chars": 17939,
+   "full_text_digest": "sha256:2303ed7cd72347e3f64dd9cadf4f2398ad7f2317678d78cd59ae8c55fb03175a",
+   "source_available": true,
+   "existing_reader_note": false,
+   "locator_support": "paragraph-level via flattened full_text; sentence-level derivable",
+   "est_input_tokens_lower_bound": 4484,
+   "four_axis_checks": [
+    {
+     "axis": "id_version_overlap",
+     "finding": "no hits in Development ids 1802.07862/1901.10133 or versions",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "ai_papers_note_history",
+     "finding": "no hits in ai_papers/docs/eval/reader-note-quality (15 GT) or data/runs sweeps",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "judge_prompt_dev_exposure",
+     "finding": "no hits in rrsi poc/runs outside the frozen dataset file itself",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "gold_perturbation_design_overlap",
+     "finding": "no hits in review-packets*, perturbation-audit sources",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    }
+   ],
+   "caveat": "no structured exposure evidence found in swept registries; evidence absence is NOT proof of non-exposure — coverage bounded by swept locations",
+   "status": "UNSEEN_CANDIDATE",
+   "est_note": "char/4 lower-bound is an ESTIMATE; no Reader Note exists, no measured tokens"
+  },
+  {
+   "paper_id": "1704.06194",
+   "version": "v1",
+   "chars": 29150,
+   "topic": "relation detection",
+   "title_hint": "Relation detection core component",
+   "full_text_chars": 29150,
+   "full_text_digest": "sha256:1655a31df68dda574a35dc19f026ee59bf6b61f9745ebf3e9b156f92bb69b144",
+   "source_available": true,
+   "existing_reader_note": false,
+   "locator_support": "paragraph-level via flattened full_text; sentence-level derivable",
+   "est_input_tokens_lower_bound": 7287,
+   "four_axis_checks": [
+    {
+     "axis": "id_version_overlap",
+     "finding": "no hits in Development ids 1802.07862/1901.10133 or versions",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "ai_papers_note_history",
+     "finding": "no hits in ai_papers/docs/eval/reader-note-quality (15 GT) or data/runs sweeps",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "judge_prompt_dev_exposure",
+     "finding": "no hits in rrsi poc/runs outside the frozen dataset file itself",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "gold_perturbation_design_overlap",
+     "finding": "no hits in review-packets*, perturbation-audit sources",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    }
+   ],
+   "caveat": "no structured exposure evidence found in swept registries; evidence absence is NOT proof of non-exposure — coverage bounded by swept locations",
+   "status": "UNSEEN_CANDIDATE",
+   "est_note": "char/4 lower-bound is an ESTIMATE; no Reader Note exists, no measured tokens"
+  },
+  {
+   "paper_id": "1809.04267",
+   "version": "v1",
+   "chars": 24368,
+   "topic": "machine reading comprehension",
+   "title_hint": "MRC requires reasoning",
+   "full_text_chars": 24368,
+   "full_text_digest": "sha256:e38bcfb1b5b5b4850318da04f07cd8dae317cdce878546e11bbb8b5d041c6d05",
+   "source_available": true,
+   "existing_reader_note": false,
+   "locator_support": "paragraph-level via flattened full_text; sentence-level derivable",
+   "est_input_tokens_lower_bound": 6092,
+   "four_axis_checks": [
+    {
+     "axis": "id_version_overlap",
+     "finding": "no hits in Development ids 1802.07862/1901.10133 or versions",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "ai_papers_note_history",
+     "finding": "no hits in ai_papers/docs/eval/reader-note-quality (15 GT) or data/runs sweeps",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "judge_prompt_dev_exposure",
+     "finding": "no hits in rrsi poc/runs outside the frozen dataset file itself",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "gold_perturbation_design_overlap",
+     "finding": "no hits in review-packets*, perturbation-audit sources",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    }
+   ],
+   "caveat": "no structured exposure evidence found in swept registries; evidence absence is NOT proof of non-exposure — coverage bounded by swept locations",
+   "status": "UNSEEN_CANDIDATE",
+   "est_note": "char/4 lower-bound is an ESTIMATE; no Reader Note exists, no measured tokens"
+  },
+  {
+   "paper_id": "1912.04961",
+   "version": "v1",
+   "chars": 29279,
+   "topic": "clinical conversations, information extraction",
+   "title_hint": "Extracting relevant information from clinical conversations",
+   "full_text_chars": 29279,
+   "full_text_digest": "sha256:0d8e73365851e26e6d4672ca6388059b8df55559050fba5a83d66a80a3b5b025",
+   "source_available": true,
+   "existing_reader_note": false,
+   "locator_support": "paragraph-level via flattened full_text; sentence-level derivable",
+   "est_input_tokens_lower_bound": 7319,
+   "four_axis_checks": [
+    {
+     "axis": "id_version_overlap",
+     "finding": "no hits in Development ids 1802.07862/1901.10133 or versions",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "ai_papers_note_history",
+     "finding": "no hits in ai_papers/docs/eval/reader-note-quality (15 GT) or data/runs sweeps",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "judge_prompt_dev_exposure",
+     "finding": "no hits in rrsi poc/runs outside the frozen dataset file itself",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "gold_perturbation_design_overlap",
+     "finding": "no hits in review-packets*, perturbation-audit sources",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    }
+   ],
+   "caveat": "no structured exposure evidence found in swept registries; evidence absence is NOT proof of non-exposure — coverage bounded by swept locations",
+   "status": "UNSEEN_CANDIDATE",
+   "est_note": "char/4 lower-bound is an ESTIMATE; no Reader Note exists, no measured tokens"
+  },
+  {
+   "paper_id": "2004.03354",
+   "version": "v1",
+   "chars": 17525,
+   "topic": "domain adaptation of PTLMs",
+   "title_hint": "Domain adaptation of Pretrained Language Models",
+   "full_text_chars": 17525,
+   "full_text_digest": "sha256:30bf0404b00540f7154a23195c4d6f7d4b47190b6b1c86005fba54c9355f90a6",
+   "source_available": true,
+   "existing_reader_note": false,
+   "locator_support": "paragraph-level via flattened full_text; sentence-level derivable",
+   "est_input_tokens_lower_bound": 4381,
+   "four_axis_checks": [
+    {
+     "axis": "id_version_overlap",
+     "finding": "no hits in Development ids 1802.07862/1901.10133 or versions",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "ai_papers_note_history",
+     "finding": "no hits in ai_papers/docs/eval/reader-note-quality (15 GT) or data/runs sweeps",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "judge_prompt_dev_exposure",
+     "finding": "no hits in rrsi poc/runs outside the frozen dataset file itself",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "gold_perturbation_design_overlap",
+     "finding": "no hits in review-packets*, perturbation-audit sources",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    }
+   ],
+   "caveat": "no structured exposure evidence found in swept registries; evidence absence is NOT proof of non-exposure — coverage bounded by swept locations",
+   "status": "UNSEEN_CANDIDATE",
+   "est_note": "char/4 lower-bound is an ESTIMATE; no Reader Note exists, no measured tokens"
+  },
+  {
+   "paper_id": "1909.08089",
+   "version": "v1",
+   "chars": 28109,
+   "topic": "neural single document extraction",
+   "title_hint": "Neural single document extractive summarization",
+   "full_text_chars": 28109,
+   "full_text_digest": "sha256:077de5abfc5f73a32f757a26a7c9c340f2dc6e48aa53f93744de7dce76a53516",
+   "source_available": true,
+   "existing_reader_note": false,
+   "locator_support": "paragraph-level via flattened full_text; sentence-level derivable",
+   "est_input_tokens_lower_bound": 7027,
+   "four_axis_checks": [
+    {
+     "axis": "id_version_overlap",
+     "finding": "no hits in Development ids 1802.07862/1901.10133 or versions",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "ai_papers_note_history",
+     "finding": "no hits in ai_papers/docs/eval/reader-note-quality (15 GT) or data/runs sweeps",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "judge_prompt_dev_exposure",
+     "finding": "no hits in rrsi poc/runs outside the frozen dataset file itself",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "gold_perturbation_design_overlap",
+     "finding": "no hits in review-packets*, perturbation-audit sources",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    }
+   ],
+   "caveat": "no structured exposure evidence found in swept registries; evidence absence is NOT proof of non-exposure — coverage bounded by swept locations",
+   "status": "UNSEEN_CANDIDATE",
+   "est_note": "char/4 lower-bound is an ESTIMATE; no Reader Note exists, no measured tokens"
+  },
+  {
+   "paper_id": "1801.05147",
+   "version": "v1",
+   "chars": 35284,
+   "topic": "crowdsourced data acquisition",
+   "title_hint": "Obtain new labeled data, crowdsourcing",
+   "full_text_chars": 35284,
+   "full_text_digest": "sha256:3d09eb0574b0cb3d0a9187b186e67a95adcbe0e7fec26c2a1fc7fcf9f427e195",
+   "source_available": true,
+   "existing_reader_note": false,
+   "locator_support": "paragraph-level via flattened full_text; sentence-level derivable",
+   "est_input_tokens_lower_bound": 8821,
+   "four_axis_checks": [
+    {
+     "axis": "id_version_overlap",
+     "finding": "no hits in Development ids 1802.07862/1901.10133 or versions",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "ai_papers_note_history",
+     "finding": "no hits in ai_papers/docs/eval/reader-note-quality (15 GT) or data/runs sweeps",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "judge_prompt_dev_exposure",
+     "finding": "no hits in rrsi poc/runs outside the frozen dataset file itself",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    },
+    {
+     "axis": "gold_perturbation_design_overlap",
+     "finding": "no hits in review-packets*, perturbation-audit sources",
+     "evidence_scope": "file+manifest+registry+run-metadata sweep 2026-10-29",
+     "evidence_paths": [
+      "ai_papers/docs/eval/reader-note-quality/",
+      "ai_papers/data/runs/",
+      "poc/runs/",
+      "research_benchmarks/benchmarks/qasper/fixture/"
+     ]
+    }
+   ],
+   "caveat": "no structured exposure evidence found in swept registries; evidence absence is NOT proof of non-exposure — coverage bounded by swept locations",
+   "status": "UNSEEN_CANDIDATE",
+   "est_note": "char/4 lower-bound is an ESTIMATE; no Reader Note exists, no measured tokens"
+  }
+ ]
+}

@@ -1,0 +1,24 @@
+{
+ "schema": "r7-separation-proof/v0.2",
+ "summary": {
+  "development": [
+   "1802.07862",
+   "1901.10133"
+  ],
+  "unseen_candidates": [
+   "1704.06194",
+   "1801.05147",
+   "1809.04267",
+   "1810.08699",
+   "1909.08089",
+   "1912.01214",
+   "1912.04961",
+   "2004.03354"
+  ],
+  "intersection_empty": true,
+  "unseen_candidate_count": 8,
+  "exposed_excluded": 2,
+  "insufficient_evidence": 0
+ },
+ "verdict": "separation proven at id/version/lineage level; exposure-history caveat recorded per candidate"
+}
