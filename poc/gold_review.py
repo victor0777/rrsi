@@ -31,7 +31,13 @@ from pathlib import Path
 REVIEW_STATES = ("DRAFT", "SOURCE_VERIFIED", "HUMAN_REVIEW_REQUIRED",
                  "APPROVED", "REJECTED", "NEEDS_REVISION")
 
-REVIEW_DECISIONS = ("Approve", "Reject", "Needs Revision")
+REVIEW_DECISIONS = ("Approve", "Reject", "Needs Revision",
+                    "Recommend Approval", "Recommend Revision")
+
+# Approval-effective decisions: only an explicit independent "Approve" with the
+# 5 conditions produces APPROVED. A "Recommend Approval" is an endorsement
+# opinion — it never promotes a fixture to APPROVED (final owner decision).
+APPROVAL_EFFECTIVE = ("Approve",)
 
 APPROVAL_CONDITIONS = (
     "source_identity_match", "source_context_sufficient",
@@ -60,12 +66,12 @@ def record_review(*, fixture_path: Path, reviewer: str, reviewer_role: str,
     if decision not in REVIEW_DECISIONS:
         raise GoldReviewBlocked("REVIEW_DECISION_UNKNOWN", decision)
     if reviewer_role.lower() in AUTHOR_ROLES:
-        # author path can never approve
-        if decision == "Approve":
+        # author path can never approve or endorse
+        if decision in APPROVAL_EFFECTIVE or decision == "Recommend Approval":
             raise GoldReviewBlocked("SELF_APPROVAL_REFUSED", reviewer_role)
     missing = [c for c in APPROVAL_CONDITIONS
                if c not in conditions or conditions[c] is not True]
-    if decision == "Approve" and missing:
+    if decision in APPROVAL_EFFECTIVE and missing:
         raise GoldReviewBlocked("APPROVAL_CONDITIONS_INCOMPLETE", ",".join(missing))
     record = {
         "schema": "rrsi-gold-review-record/v0.1",
@@ -101,7 +107,13 @@ def approval_state(fixture_path: Path, reviews_path: Path) -> dict:
                 "reason": "no independent review records for this digest"}
     latest = records[-1]
     decision = latest["decision"]
-    if decision == "Approve":
+    if decision == "Recommend Approval":
+        return {"state": "RECOMMENDED", "reviews": len(records),
+                "reviewer": latest["reviewer"],
+                "reason": "independent endorsement recorded — final owner "
+                          "approval is a separate decision; not APPROVED",
+                "decision": decision}
+    if decision in APPROVAL_EFFECTIVE:
         return {"state": "APPROVED", "reviews": len(records),
                 "reviewer": latest["reviewer"],
                 "review_timestamp": latest["review_timestamp"]}

@@ -1,0 +1,9 @@
+{
+ "artifact_digests": {
+  "gold-candidate-registry.json": "f1236fd0c122f8a97c18256c2e2dc2865cd32d9959b4c3114824f91392e3cb12",
+  "p1min-1802-claim-only-removed.md": "bda31b8338a2c148c1ab9c1cf9433250b02d0605201ea668a8d0331b13e703af",
+  "review-records.jsonl": "006d3928bffbc8cfd0d73aa7d2b4cbfbca8a5d7697fdfdbb400f68df603644fc"
+ },
+ "run_dir": "poc/runs/perturbation-audit/r5-adjudication",
+ "schema": "rrsi-run-dir-seal/v0.1"
+}

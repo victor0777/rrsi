@@ -1,0 +1,79 @@
+{
+ "schema": "rrsi-gold-candidate-registry-r5/v0.1",
+ "fixture_bundle": "poc/runs/perturbation-audit/r2-semantic/semantic-gold-fixture.json",
+ "gold_bundle_digest": "3ce9c206f4a83008cf5bd9994be64cc952981ea3ea74c16b5ffca073daf25523",
+ "record_series": "r3(경험적 거부 실증) → r4(R1 8건) → r5(R4 재검정 8건) — append-only 연속, 파일별 무변경",
+ "note": "approval_state는 bundle digest 단위라 fixture별 상태를 구분하지 못함 — fixture별 상태는 본 registry가 권위",
+ "candidates": [
+  {
+   "fixture_id": "g3-1802-result",
+   "paper": "1802.07862",
+   "state": "RECOMMENDED_PENDING_FINAL_OWNER",
+   "scope": "Numeric Fidelity",
+   "perturbation": "r1/p2-1802-vocab (15,733→15,800)",
+   "expected_direction": "numeric consistency ↓"
+  },
+  {
+   "fixture_id": "g4-1802-numeric",
+   "paper": "1802.07862",
+   "state": "RECOMMENDED_PENDING_FINAL_OWNER",
+   "scope": "Normalized Numeric Fidelity",
+   "perturbation": "r1/p2-1802-size (10,000→12,000)",
+   "expected_direction": "(a) 10K↔10,000 normalized 허용 (b) 12,000 감지",
+   "note": "literal 불일치는 원본 오탐으로 문서화된 한계 유지"
+  },
+  {
+   "fixture_id": "g7-1901-method",
+   "paper": "1901.10133",
+   "state": "RECOMMENDED_PENDING_FINAL_OWNER",
+   "scope": "Partial Required Information Coverage Loss",
+   "perturbation": "r2/p5-1901-method-removed",
+   "expected_direction": "step content 소실·이름 잔존(8회) → coverage ↓ (partial)",
+   "note": "deterministic 길이·문장수 축 감지 가능; coverage 판정은 Gold/judge"
+  },
+  {
+   "fixture_id": "g1-1802-claim",
+   "paper": "1802.07862",
+   "state": "NEEDS_REVISION",
+   "revision": "minimal claim-only variant p1min 생성(r5); 원 P1은 보존·별도 사례로 유지. P4 모순은 별도 평가 사례 유지",
+   "scope_pending": "Claim Fidelity (제한 예정)"
+  },
+  {
+   "fixture_id": "g8-1901-result",
+   "paper": "1901.10133",
+   "state": "NEEDS_REVISION",
+   "finding": "ORIGINAL NOTE INTERPRETATION ERROR CONFIRMED — Eq.1 대조로 note의 가중치 해석이 반대",
+   "axis_split": {
+    "numeric_value_fidelity": "0.25 = source ✓",
+    "numeric_interpretation_fidelity": "note 'S1에 더 큰 비중' — 원문 공식상 반대 (t=0.25 → S1 0.25 < S2 0.75) ✗"
+   },
+   "handling": "오류 기록 보존(r5 별도 기록)·Gold 정답으로 사용 금지; Gold 사용 시 Numeric Value Fidelity로만 한정"
+  },
+  {
+   "fixture_id": "g2-1802-method",
+   "state": "UNAVAILABLE_CONFIRMED",
+   "note": "변형 부재 — 승인된 Semantic Discrimination 사례로 계산하지 않음; fixture 유지"
+  },
+  {
+   "fixture_id": "g6-1901-claim",
+   "state": "UNAVAILABLE_CONFIRMED",
+   "note": "동일"
+  },
+  {
+   "fixture_id": "g9-1901-evidence",
+   "state": "UNAVAILABLE_CONFIRMED",
+   "note": "동일"
+  },
+  {
+   "fixture_id": "g5-1802-evidence",
+   "state": "EXCLUDED (Evidence Absence) — r3 확정 유지"
+  }
+ ],
+ "counts": {
+  "recommended_pending_final_owner": 3,
+  "needs_revision": 2,
+  "unavailable": 3,
+  "excluded": 1,
+  "approved": 0
+ }
+}

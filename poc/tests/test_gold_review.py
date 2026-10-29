@@ -71,3 +71,32 @@ def test_valid_approval(tmp_path):
 def test_no_records_state(tmp_path):
     assert approval_state(_fixture(tmp_path), tmp_path / "absent.jsonl")["state"] == \
         "HUMAN_REVIEW_REQUIRED"
+
+
+def test_recommend_approval_is_not_approved(tmp_path):
+    """Contract R5: an independent 'Recommend Approval' records an endorsement
+    but must never promote the fixture to APPROVED (final owner decision)."""
+    import json as _json
+    fixture = tmp_path / "bundle.json"
+    fixture.write_text("{}")
+    out = tmp_path / "records.jsonl"
+    record_review(fixture_path=fixture, reviewer="ind",
+                  reviewer_role="independent-reviewer",
+                  decision="Recommend Approval", comment="endorsement",
+                  conditions={}, out_path=out)
+    st = approval_state(fixture, out)
+    assert st["state"] == "RECOMMENDED"
+    assert st["state"] != "APPROVED"
+
+
+def test_author_path_recommendation_refused(tmp_path):
+    """Contract R5: the author path cannot even endorse approval."""
+    fixture = tmp_path / "bundle.json"
+    fixture.write_text("{}")
+    out = tmp_path / "records.jsonl"
+    with pytest.raises(GoldReviewBlocked) as e:
+        record_review(fixture_path=fixture, reviewer="automation",
+                      reviewer_role="author",
+                      decision="Recommend Approval", comment="",
+                      conditions={}, out_path=out)
+    assert "SELF_APPROVAL_REFUSED" in str(e.value)
