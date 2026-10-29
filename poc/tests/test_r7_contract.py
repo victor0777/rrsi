@@ -20,11 +20,14 @@ sys.path.insert(0, str(RRSI_ROOT))
 sys.path.insert(0, "/home/ktl/projects/ai_papers/src")
 
 from poc.r7_contract import (  # noqa: E402
-    JUDGE_SCHEMA_VERSION, PIPELINE_ROLES, VERIFICATION_EVIDENCE_FIELDS,
-    INFO_LOSS_ANCHOR_ROLES, markdown_normalize, check_component_inputs,
-    resolve_claim_evidence, sha256, validate_anchor, validate_claim,
-    validate_human_review, validate_judge_output, verify_absence,
-    verify_info_loss,
+    JUDGE_OUTPUT_FIELDS, JUDGE_SCHEMA_VERSION, PIPELINE_ROLES,
+    REVIEWER_REGISTRY_STATUSES,
+    VERIFICATION_EVIDENCE_FIELDS, INFO_LOSS_ANCHOR_ROLES,
+    _REVIEWER_REGISTRY, check_component_inputs, finalize_review_record,
+    markdown_normalize,
+    register_reviewer, resolve_claim_evidence, reviewer_status, sha256,
+    validate_anchor, validate_claim, validate_human_review,
+    validate_judge_output, verify_absence, verify_info_loss,
 )
 
 # synthetic development texts (from approved R6I fixture content)
@@ -249,19 +252,44 @@ def loss_call(**kw):
     return verify_info_loss(**base)
 
 
+SYNTHETIC_REVIEWER = "synthetic-reviewer-1"
+
+
+@pytest.fixture(autouse=True)
+def synthetic_reviewer_registry():
+    # §D2A.1-C3 — synthetic fixture reviewer for STATIC tests only;
+    # never a real reviewer approval record. Registry starts empty in
+    # production code.
+    register_reviewer(SYNTHETIC_REVIEWER, "REGISTERED", synthetic=True)
+    yield
+    _REVIEWER_REGISTRY.clear()
+
+
 def review_record(gav="CONFIRMED", siv="IMPORTANT", digests=None,
                   claim_id="c-loss-1", **overrides):
-    rec = {"reviewer_id": "reviewer-1", "claim_id": claim_id,
-           "document_digests": digests or {
+    rec = {"review_id": "rev-1", "reviewer_id": SYNTHETIC_REVIEWER,
+           "claim_id": claim_id,
+           "reviewed_document_digests": digests or {
                "orig": sha256(ORIGINAL), "pert": sha256(PERTURBED),
                "source": sha256(SOURCE)},
+           "review_timestamp": "2026-10-29T00:00:00Z",
+           "review_scope": "full original + full perturbed notes + "
+                           "source-importance review against the source "
+                           "paper",
            "global_absence_verdict": gav,
            "source_importance_verdict": siv,
-           "rationale": "deletion confirmed at mapped position; importance "
-                        "confirmed against the source paper",
-           "review_scope": "full original + perturbed notes + source paper"}
+           "rationale": "deletion confirmed at the mapped position; "
+                        "importance confirmed against the source paper; "
+                        "residual probe locations reviewed",
+           "evidence_refs": [{"document_id": "orig",
+                              "quote": "10,000 user-generated "
+                                       "image-caption pairs"},
+                             {"document_id": "pert",
+                              "quote": "Captions average 30.7 characters "
+                                       "in length,"}],
+           }
     rec.update(overrides)
-    return rec
+    return finalize_review_record(rec)
 
 
 def test_info_loss_three_evidence_full_chain():
@@ -272,10 +300,12 @@ def test_info_loss_three_evidence_full_chain():
 
 
 def test_info_loss_verified_with_structured_review_record():
+    # T14 — synthetic-fixture reviewer, static test only
     r = loss_call(human_review_record=review_record())
     assert r["verification_status"] == "VERIFIED"
     assert r["review_record_validation"]["valid"] is True
     assert r["record"]["human_review_recorded"] is True
+    assert r["record"]["reviewer_status"] == "REGISTERED"
 
 
 # ------------------- §D2A-E negative regression matrix ----------------------
@@ -300,7 +330,7 @@ def test_neg3_uncertain_source_importance_is_pending():
 
 
 def test_neg4_review_record_digest_mismatch():
-    bad_digests = review_record().get("document_digests").copy()
+    bad_digests = review_record().get("reviewed_document_digests").copy()
     bad_digests["pert"] = "sha256:deadbeef"
     rec = review_record(digests=bad_digests)
     v = validate_human_review(rec, claim_id="c-loss-1", documents=DOCS,
@@ -365,8 +395,10 @@ def test_neg8_gold_passed_to_judge_boundary_violation():
 
 
 def test_info_loss_info_present_elsewhere_never_machine_verified():
-    # same info remains elsewhere in the perturbed note → even a valid
-    # review record cannot VERIFY (machine global absence fails)
+    # T10 — residual probe locations exist but were NOT reviewed:
+    # PENDING. Lexical presence alone never FAILS a loss claim (new
+    # policy per D2A.1-B1/B4); a reviewed record flips this to VERIFIED
+    # (see T09) only when the residual locations were actually reviewed.
     pert = PERTURBED + " TextRank supplies the keyword centroids."
     docs = dict(DOCS, pert=pert)  # registry must match the probed text
     anchors = dict(LOSS_ANCHORS,
@@ -379,7 +411,8 @@ def test_info_loss_info_present_elsewhere_never_machine_verified():
     r = loss_call(perturbed_note=pert, documents=docs,
                   human_review_record=rec, **anchors)
     assert r["evidence_perturbed_absence"][
-        "global_absence_machine_confirmed"] is False
+        "residual_probe_locations"] is True
+    assert r["evidence_perturbed_absence"]["residual_reviewed"] is None
     assert r["verification_status"] == "PENDING_HUMAN_REVIEW"
 
 
@@ -415,3 +448,205 @@ def test_judge_strict_validation_types_and_duplicates():
     assert not r4["valid"]
     assert any("ABSTENTION_REQUIRES_ABSTAINED_VERDICTS" in p
                for p in r4["problems"])
+
+
+# ================= §D2A.1 regression matrix (T01–T14) =======================
+def test_T01_judge_output_none():
+    r = validate_judge_output(None)
+    assert not r["valid"]
+    assert "INVALID_OUTPUT_TYPE" in r["problems"]
+
+
+def test_T02_claims_integer():
+    r = validate_judge_output(judge_output(claims=123))
+    assert not r["valid"]
+    assert "CLAIMS_NOT_LIST" in r["problems"]
+    assert r["claims"] == []
+
+
+def test_T03_evidence_refs_dict():
+    r = validate_judge_output(judge_output(evidence_refs={"e-1": {}}))
+    assert not r["valid"]
+    assert "EVIDENCE_REFS_NOT_LIST_OF_STR" in r["problems"]
+
+
+def test_T04_claim_element_list():
+    r = validate_judge_output(judge_output(claims=[["c-1"]]))
+    assert not r["valid"]
+    assert any("CLAIM_NOT_OBJECT" in p for p in r["problems"])
+
+
+def test_T05_duplicate_evidence_reference():
+    r = validate_judge_output(judge_output(evidence_refs=["e-1", "e-1"]))
+    assert not r["valid"]
+    assert "DUPLICATE_EVIDENCE_REF" in r["problems"]
+
+
+def test_T06_review_record_digest_integrity_fail_pending():
+    rec = review_record()
+    # tamper with payload after digest was attached
+    rec = dict(rec, rationale="tampered rationale after digesting")
+    r = loss_call(human_review_record=rec)
+    assert any("REVIEW_RECORD_DIGEST_INVALID" in p
+               for p in r["review_record_validation"]["problems"])
+    assert r["verification_status"] == "PENDING_HUMAN_REVIEW"
+
+
+def test_T07_unregistered_reviewer_pending():
+    _REVIEWER_REGISTRY.clear()  # production default: no reviewers assigned
+    assert reviewer_status(SYNTHETIC_REVIEWER) == "UNREGISTERED"
+    r = loss_call(human_review_record=review_record())
+    assert r["record"]["reviewer_status"] == "UNREGISTERED"
+    assert r["verification_status"] == "PENDING_HUMAN_REVIEW"
+
+
+def test_T08_insufficient_review_scope_pending():
+    rec = review_record(review_scope="original note only")
+    r = loss_call(human_review_record=rec)
+    assert any("REVIEW_SCOPE_INSUFFICIENT" in p
+               for p in r["review_record_validation"]["problems"])
+    assert r["verification_status"] == "PENDING_HUMAN_REVIEW"
+
+
+def test_T09_partial_loss_with_reviewed_residual_verified():
+    # T09 — synthetic-fixture reviewer, static test only. Partial loss:
+    # the term survives but the relation/procedure it carried is gone.
+    orig = ("TextRank extracts keywords, which are then used to construct "
+            "the initial representation.")
+    pert = "TextRank is used in the pipeline."
+    source = ("TextRank keyword extraction and its role in constructing "
+              "the initial representation are mandatory steps of the "
+              "proposed method.")
+    docs = {"orig": orig, "pert": pert, "source": source}
+    rec = finalize_review_record({
+        "review_id": "rev-p1", "reviewer_id": SYNTHETIC_REVIEWER,
+        "claim_id": "c-p1",
+        "reviewed_document_digests": {"orig": sha256(orig),
+                                      "pert": sha256(pert),
+                                      "source": sha256(source)},
+        "review_timestamp": "2026-10-29T00:00:00Z",
+        "review_scope": "full perturbed note + source-importance review",
+        "global_absence_verdict": "CONFIRMED",
+        "source_importance_verdict": "IMPORTANT",
+        "rationale": "TextRank survives as a name but the keyword-"
+                     "extraction role and the follow-up relation are "
+                     "gone; residual occurrence was reviewed and judged "
+                     "non-equivalent",
+        "evidence_refs": [{"document_id": "pert",
+                           "quote": "TextRank is used in the pipeline."}],
+        "lexical_probe_reviewed": True,
+    })
+    r = verify_info_loss(
+        claim_id="c-p1",
+        original_note_anchor=d("orig", orig, "original_note",
+                               "TextRank extracts keywords", "byte_exact"),
+        absence_evidence=d("pert", pert, "perturbed_note",
+                           "TextRank is used in the pipeline.",
+                           "byte_exact"),
+        source_importance=d("source", source, "source_paper",
+                            "constructing the initial representation",
+                            "semantic_review"),
+        documents=docs, original_note=orig, perturbed_note=pert,
+        source_paper=source, human_review_record=rec)
+    assert r["evidence_perturbed_absence"][
+        "residual_probe_locations"] is True
+    assert r["evidence_perturbed_absence"]["residual_reviewed"] is True
+    assert r["verification_status"] == "VERIFIED"  # partial loss verified
+
+
+def test_T10_residual_not_reviewed_pending():
+    # T10 — residual exists, record does not mark lexical_probe_reviewed
+    pert = PERTURBED + " TextRank supplies the keyword centroids."
+    docs = dict(DOCS, pert=pert)
+    anchors = dict(LOSS_ANCHORS,
+                   absence_evidence=d("pert", pert, "perturbed_note",
+                                      "Captions average 30.7 characters "
+                                      "in length,"))
+    rec = review_record(digests={"orig": sha256(ORIGINAL),
+                                 "pert": sha256(pert),
+                                 "source": sha256(SOURCE)})
+    r = loss_call(perturbed_note=pert, documents=docs,
+                  human_review_record=rec, **anchors)
+    assert r["verification_status"] == "PENDING_HUMAN_REVIEW"
+
+
+def test_T11_source_importance_negative_fails():
+    r = loss_call(human_review_record=review_record(siv="NOT_IMPORTANT"))
+    assert r["verification_status"] == "FAILED"
+
+
+def test_T12_document_digest_mismatch_fails():
+    docs2 = dict(DOCS, pert=PERTURBED.replace("12,000", "13,000"))
+    r = verify_info_loss(claim_id="c-loss-1", **LOSS_ANCHORS,
+                         documents=docs2, original_note=ORIGINAL,
+                         perturbed_note=PERTURBED, source_paper=SOURCE,
+                         human_review_record=review_record())
+    assert any("DOCUMENT_VERSION_CONFLICT" in p
+               for p in r["record"]["document_binding_problems"])
+    assert r["verification_status"] == "FAILED"
+
+
+def test_T13_claim_id_mismatch_pending():
+    rec = review_record(claim_id="c-other")  # record bound to another claim
+    r = loss_call(human_review_record=rec)
+    assert any("CLAIM_ID_MISMATCH" in p
+               for p in r["review_record_validation"]["problems"])
+    assert r["verification_status"] == "PENDING_HUMAN_REVIEW"
+
+
+def test_T14_valid_structured_review_verified():
+    r = loss_call(human_review_record=review_record())
+    assert r["verification_status"] == "VERIFIED"
+    assert r["review_record_validation"]["problems"] == []
+
+
+# ================= §D2A.1-A3 property-oriented negative tests ===============
+def test_a3_malformed_json_shapes_never_raise():
+    # §D2A.1-A3 — diverse malformed JSON shapes: no exception, valid=False
+    malformed = [
+        None, [], 0, 1, "", "invalid", True, 3.14,
+        {"claims": None}, {"claims": 123}, {"claims": "invalid"},
+        {"claims": {}}, {"claims": [None]}, {"claims": [1, 2, 3]},
+        {"claims": []},
+        {"relative": 1, "a_verdict": [], "b_verdict": {}, "claims": [],
+         "evidence_refs": None, "abstention": "yes", "schema_version": 0.3},
+        {"relative": "A", "a_verdict": "VALID", "b_verdict": "INVALID",
+         "claims": [{"claim_id": 1}], "evidence_refs": ["e"],
+         "abstention": False, "schema_version": JUDGE_SCHEMA_VERSION},
+        {"relative": "A", "a_verdict": "VALID", "b_verdict": "INVALID",
+         "claims": [{"claim_id": "c-1", "kind": "numeric_error",
+                     "target_side": "B", "claim_text": "x",
+                     "observed_evidence_refs": ["e"]}],
+         "evidence_refs": "e", "abstention": False,
+         "schema_version": JUDGE_SCHEMA_VERSION},
+    ]
+    for m in malformed:
+        r = validate_judge_output(m)  # must not raise
+        assert r["valid"] is False, (m, r)
+
+
+def test_a3_fuzz_fixed_seed_reproducible():
+    # §D2A.1-A3 — fixed-seed random fuzz: validator never raises;
+    # same seed ⇒ same problem list (reproducibility)
+    import random
+    rng = random.Random(20261029)
+    pool = [None, 0, 1, "", "x", [], {}, True, 3.14, "c-1", "VALID",
+            "numeric_error", "B", ["e-1"], ["c-1"], {"e": 1}]
+    seen = None
+    for _ in range(300):
+        out = {}
+        for f in JUDGE_OUTPUT_FIELDS:
+            out[f] = rng.choice(pool) if rng.random() < 0.5 else \
+                rng.choice(pool)
+        r = validate_judge_output(out)  # must not raise
+        assert isinstance(r["problems"], list)
+        if rng.random() < 0.01:
+            assert r == validate_judge_output(out)  # deterministic
+
+
+def test_a3_judge_schema_v03_unchanged():
+    # §D2A.1-A2 — schema stays v0.3; valid output still validates
+    assert JUDGE_SCHEMA_VERSION == "r7-judge-output/v0.3"
+    assert validate_judge_output(judge_output())["valid"]
+    assert set(REVIEWER_REGISTRY_STATUSES) == {
+        "REGISTERED", "UNREGISTERED", "REVOKED", "PENDING_ASSIGNMENT"}
