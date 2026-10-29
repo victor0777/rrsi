@@ -20,8 +20,10 @@ sys.path.insert(0, str(RRSI_ROOT))
 sys.path.insert(0, "/home/ktl/projects/ai_papers/src")
 
 from poc.r7_contract import (  # noqa: E402
-    INFO_LOSS_ANCHOR_ROLES, markdown_normalize, sha256, validate_anchor,
-    validate_claim, verify_absence,
+    JUDGE_SCHEMA_VERSION, PIPELINE_ROLES, VERIFICATION_EVIDENCE_FIELDS,
+    INFO_LOSS_ANCHOR_ROLES, markdown_normalize, resolve_claim_evidence,
+    sha256, validate_anchor, validate_claim, validate_judge_output,
+    verify_absence, verify_info_loss,
 )
 
 # synthetic development texts (from approved R6I fixture content)
@@ -153,3 +155,149 @@ def test_absence_never_verified_by_string_absence_alone():
                r["global_absence"]["lexical_hits"].values())
     assert r["global_absence"]["conclusion"] == "PENDING_HUMAN_REVIEW"
     assert r["verification_status"] == "PENDING_HUMAN_REVIEW"
+
+
+# ---------------- §A/B pipeline separation tests (staged architecture) -------
+def judge_output(**overrides) -> dict:
+    out = {
+        "relative": "A", "a_verdict": "VALID", "b_verdict": "INVALID",
+        "claims": [{
+            "claim_id": "c-1", "kind": "numeric_error",
+            "target_side": "B", "claim_text": "12,000 should be 10,000",
+            "observed_evidence_refs": ["e-1"]}],
+        "evidence_refs": ["e-1"], "abstention": False,
+        "schema_version": JUDGE_SCHEMA_VERSION,
+    }
+    out.update(overrides)
+    return out
+
+
+def test_judge_output_v03_valid():
+    r = validate_judge_output(judge_output())
+    assert r["valid"], r["problems"]
+    assert len(r["claims"]) == 1
+
+
+def test_judge_output_forbidden_fields_rejected():
+    # judge must not assert source importance or verification status
+    out = judge_output(claims=[{
+        "claim_id": "c-1", "kind": "numeric_error", "target_side": "B",
+        "claim_text": "x", "observed_evidence_refs": ["e-1"],
+        "importance_evidence": "from source paper",
+        "verification_status": "VERIFIED"}])
+    r = validate_judge_output(out)
+    assert not r["valid"]
+    assert any("JUDGE_FORBIDDEN_FIELD" in p for p in r["problems"])
+
+
+def test_judge_abstention_requires_undecidable():
+    r = validate_judge_output(judge_output(abstention=True))
+    assert not r["valid"]
+    assert any("ABSTENTION_REQUIRES_UNDECIDABLE" in p for p in r["problems"])
+
+
+def test_pipeline_role_permission_matrix():
+    # judge denied source/gold/truth; resolver locator-only; adjudicator all
+    assert PIPELINE_ROLES["SemanticJudge"]["source_paper"] == "denied"
+    assert PIPELINE_ROLES["SemanticJudge"]["gold"] == "denied"
+    assert PIPELINE_ROLES["SemanticJudge"]["perturbation_truth"] == "denied"
+    assert PIPELINE_ROLES["EvidenceResolver"]["source_paper"] == \
+        "locator-check only"
+    assert PIPELINE_ROLES["ClaimVerifier"]["source_paper"] == "allowed"
+    assert PIPELINE_ROLES["ClaimVerifier"]["gold"] == "denied"
+    assert PIPELINE_ROLES["GoldAdjudicator"]["gold"] == "allowed"
+
+
+def test_resolver_unresolved_ref_fail_closed():
+    claim = judge_output()["claims"][0]
+    r = resolve_claim_evidence(claim, {"c-1": {}}, DOCS)  # empty ref table
+    assert any("UNRESOLVED_REF" in p for p in r["problems"])
+    assert r["verification_evidence"] == []
+
+
+def test_resolver_digest_bound_record():
+    claim = judge_output()["claims"][0]
+    refs = {"c-1": {"e-1": d("pert", PERTURBED, "perturbed_note",
+                              "comprises 12,000 user-generated")}}
+    r = resolve_claim_evidence(claim, refs, DOCS)
+    assert r["problems"] == []
+    rec = r["verification_evidence"][0]
+    assert set(VERIFICATION_EVIDENCE_FIELDS) <= set(rec)
+    assert rec["verification_status"] == "VERIFIED"
+
+
+def test_info_loss_three_evidence_full_chain():
+    r = verify_info_loss(
+        claim_id="c-loss-1",
+        original_note_anchor=d("orig", ORIGINAL, "original_note",
+                               "The first algorithmic step involves "
+                               "extracting keywords from the input "
+                               "document using the TextRank algorithm.",
+                               "markdown_normalized"),
+        absence_evidence=d("pert", PERTURBED, "perturbed_note",
+                           "Captions average 30.7 characters in length,"),
+        source_importance=d("source", SOURCE, "source_paper",
+                            "TextRank keyword extraction is a mandatory "
+                            "pipeline step", "semantic_review"),
+        documents=DOCS, original_note=ORIGINAL, perturbed_note=PERTURBED,
+        human_review=False)
+    assert r["evidence_original_note"]["verification_status"] == "VERIFIED"
+    assert r["evidence_perturbed_absence"]["local_absence"] is True
+    assert r["verification_status"] == "PENDING_HUMAN_REVIEW"  # no review
+
+
+def test_info_loss_verified_with_recorded_human_review():
+    r = verify_info_loss(
+        claim_id="c-loss-1",
+        original_note_anchor=d("orig", ORIGINAL, "original_note",
+                               "The first algorithmic step involves "
+                               "extracting keywords from the input "
+                               "document using the TextRank algorithm.",
+                               "markdown_normalized"),
+        absence_evidence=d("pert", PERTURBED, "perturbed_note",
+                           "Captions average 30.7 characters in length,"),
+        source_importance=d("source", SOURCE, "source_paper",
+                            "TextRank keyword extraction is a mandatory "
+                            "pipeline step", "semantic_review"),
+        documents=DOCS, original_note=ORIGINAL, perturbed_note=PERTURBED,
+        human_review=True)
+    assert r["verification_status"] == "VERIFIED"
+    assert r["record"]["human_review_recorded"] is True
+
+
+def test_info_loss_info_present_elsewhere_never_machine_verified():
+    # same info remains elsewhere in the perturbed note → even with a
+    # recorded human review, VERIFIED is forbidden (global absence fails)
+    pert = PERTURBED + " TextRank supplies the keyword centroids."
+    r = verify_info_loss(
+        claim_id="c-loss-1",
+        original_note_anchor=d("orig", ORIGINAL, "original_note",
+                               "The first algorithmic step involves "
+                               "extracting keywords from the input "
+                               "document using the TextRank algorithm.",
+                               "markdown_normalized"),
+        absence_evidence=d("pert", PERTURBED, "perturbed_note",
+                           "Captions average 30.7 characters in length,"),
+        source_importance=d("source", SOURCE, "source_paper",
+                            "TextRank keyword extraction is a mandatory "
+                            "pipeline step", "semantic_review"),
+        documents=DOCS, original_note=ORIGINAL, perturbed_note=pert,
+        human_review=True)
+    assert r["evidence_perturbed_absence"][
+        "global_absence_machine_confirmed"] is False
+    assert r["verification_status"] == "PENDING_HUMAN_REVIEW"
+
+
+def test_info_loss_fabricated_anchor_fail_closed():
+    r = verify_info_loss(
+        claim_id="c-fab",
+        original_note_anchor=d("orig", ORIGINAL, "original_note",
+                               "The model was trained for 300 epochs.",
+                               "byte_exact"),
+        absence_evidence=d("pert", PERTURBED, "perturbed_note",
+                           "Captions average 30.7 characters in length,"),
+        source_importance=d("source", SOURCE, "source_paper",
+                            "TextRank keyword extraction", "semantic_review"),
+        documents=DOCS, original_note=ORIGINAL, perturbed_note=PERTURBED,
+        human_review=True)
+    assert r["verification_status"] == "FAILED"  # QUOTE_ABSENT fail-closed
