@@ -77,6 +77,17 @@ VERIFICATION_EVIDENCE_FIELDS = ("claim_id", "document_id",
                                 "locator", "quote", "match_policy",
                                 "verification_status", "verification_method",
                                 "verification_evidence")
+# §D2A-A — structured Human Review Record. Existence of a record is never
+# sufficient for VERIFIED: the recorded verdicts decide (negative → FAILED,
+# uncertain/unrecorded → PENDING_HUMAN_REVIEW).
+REVIEW_RECORD_FIELDS = ("reviewer_id", "claim_id", "document_digests",
+                        "global_absence_verdict",
+                        "source_importance_verdict", "rationale",
+                        "review_scope")
+REVIEW_ABSENCE_VERDICTS = ("CONFIRMED", "REFUTED", "UNCERTAIN")
+REVIEW_IMPORTANCE_VERDICTS = ("IMPORTANT", "NOT_IMPORTANT", "UNCERTAIN")
+CLAIM_TEXT_MAX_CHARS = 200
+CLAIM_ID_MAX_CHARS = 32
 # info_loss: 3-anchor contract — each role is mandatory and distinct.
 INFO_LOSS_ANCHOR_ROLES = {
     "original_note_anchor": "where the information existed in the ORIGINAL note",
@@ -88,52 +99,159 @@ INFO_LOSS_ANCHOR_ROLES = {
 
 
 def validate_judge_output(output: dict) -> dict:
-    """§A3 — Judge output schema (r7-judge-output/v0.3). The Judge emits
-    only observable-level fields: it is NOT asked for source-paper
-    importance judgments or gold information. Claims carry
-    observed_evidence_refs (resolver-facing), not verified anchors."""
+    """§A3 + §D2A-C — Judge output schema (r7-judge-output/v0.3) with
+    STRICT allow-list validation: exact types, extra-field rejection,
+    duplicate-claim-id detection, evidence-reference integrity,
+    abstention/verdict consistency and string length limits. The Judge
+    emits only observable-level fields: it is NOT asked for source-paper
+    importance judgments or gold information."""
     problems = []
+    def claim_prob(i, p):
+        problems.append(f"CLAIM[{i}]:{p}")
+    # allow-list: reject extra top-level fields
+    for field in output:
+        if field not in JUDGE_OUTPUT_FIELDS:
+            problems.append("EXTRA_FIELD_FORBIDDEN:" + field)
     for field in JUDGE_OUTPUT_FIELDS:
         if field not in output:
             problems.append(f"MISSING_FIELD:{field}")
     if problems:
         return {"schema_version": output.get("schema_version", "?"),
                 "valid": False, "problems": problems, "claims": []}
-    if output["schema_version"] != JUDGE_SCHEMA_VERSION:
+    # exact types
+    if not isinstance(output["schema_version"], str) or \
+            output["schema_version"] != JUDGE_SCHEMA_VERSION:
         problems.append("UNKNOWN_SCHEMA_VERSION")
-    if output["relative"] not in ("A", "B", "EQUAL", "UNDECIDABLE"):
+    if not isinstance(output["relative"], str) or \
+            output["relative"] not in ("A", "B", "EQUAL", "UNDECIDABLE"):
         problems.append("UNKNOWN_RELATIVE")
     for v in (output["a_verdict"], output["b_verdict"]):
-        if v not in ("VALID", "INVALID", "ABSTAINED"):
+        if not isinstance(v, str) or v not in ("VALID", "INVALID",
+                                               "ABSTAINED"):
             problems.append("UNKNOWN_VERDICT")
-    if not isinstance(output["abstention"], bool):
+    if not isinstance(output["abstention"], bool):  # exact bool, not int
         problems.append("ABSTENTION_NOT_BOOLEAN")
-    if output["abstention"] and output["relative"] != "UNDECIDABLE":
-        problems.append("ABSTENTION_REQUIRES_UNDECIDABLE")
-    parsed_claims = []
-    for i, c in enumerate(output.get("claims") or []):
-        cprobs = []
+    if not isinstance(output["claims"], list):
+        problems.append("CLAIMS_NOT_LIST")
+    if not isinstance(output["evidence_refs"], list) or not all(
+            isinstance(r, str) and r for r in output["evidence_refs"]):
+        problems.append("EVIDENCE_REFS_NOT_LIST_OF_STR")
+    # abstention / verdict consistency (both directions)
+    if output["abstention"]:
+        if output["relative"] != "UNDECIDABLE":
+            problems.append("ABSTENTION_REQUIRES_UNDECIDABLE")
+        if output["a_verdict"] != "ABSTAINED" or \
+                output["b_verdict"] != "ABSTAINED":
+            problems.append("ABSTENTION_REQUIRES_ABSTAINED_VERDICTS")
+    elif output["relative"] == "UNDECIDABLE":
+        problems.append("UNDECIDABLE_REQUIRES_ABSTENTION")
+    # claims: strict allow-list per claim
+    seen_ids = set()
+    for i, c in enumerate(output["claims"]):
+        if not isinstance(c, dict):
+            claim_prob(i, "NOT_OBJECT")
+            continue
+        for field in c:
+            if field not in JUDGE_CLAIM_FIELDS:
+                claim_prob(i, "EXTRA_FIELD_FORBIDDEN:" + field)
         for field in JUDGE_CLAIM_FIELDS:
-            if field not in c or c[field] in (None, ""):
-                cprobs.append(f"MISSING_FIELD:{field}")
+            if field not in c:
+                claim_prob(i, f"MISSING_FIELD:{field}")
+        cid = c.get("claim_id")
+        if not isinstance(cid, str) or not cid:
+            claim_prob(i, "CLAIM_ID_NOT_STRING")
+        elif len(cid) > CLAIM_ID_MAX_CHARS:
+            claim_prob(i, "CLAIM_ID_TOO_LONG")
+        elif cid in seen_ids:
+            claim_prob(i, "DUPLICATE_CLAIM_ID")
+        else:
+            seen_ids.add(cid)
         if c.get("kind") not in CLAIM_KINDS:
-            cprobs.append("UNKNOWN_CLAIM_KIND")
+            claim_prob(i, "UNKNOWN_CLAIM_KIND")
         if c.get("target_side") not in ("A", "B"):
-            cprobs.append("UNKNOWN_TARGET_SIDE")
+            claim_prob(i, "UNKNOWN_TARGET_SIDE")
+        text = c.get("claim_text")
+        if not isinstance(text, str) or not text:
+            claim_prob(i, "CLAIM_TEXT_NOT_STRING")
+        elif len(text) > CLAIM_TEXT_MAX_CHARS:
+            claim_prob(i, "CLAIM_TEXT_TOO_LONG")
         refs = c.get("observed_evidence_refs")
-        if not isinstance(refs, list) or not refs:
-            cprobs.append("OBSERVED_EVIDENCE_REFS_REQUIRED")
-        # judge must not assert verification it cannot perform
-        for forbidden in ("importance_evidence", "verification_status"):
-            if forbidden in c:
-                cprobs.append(f"JUDGE_FORBIDDEN_FIELD:{forbidden}")
-        parsed_claims.append({"index": i, "problems": cprobs,
-                              "claim_id": c.get("claim_id", "?")})
-    for c in parsed_claims:
-        problems.extend(f"CLAIM[{c['index']}]:{p}" for p in c["problems"])
-    return {"schema_version": output["schema_version"],
+        if not isinstance(refs, list) or not refs or not all(
+                isinstance(r, str) and r for r in refs):
+            # evidence reference integrity: refs required, well-typed,
+            # and every ref must be present in the judge-level evidence list
+            claim_prob(i, "OBSERVED_EVIDENCE_REFS_REQUIRED")
+        elif any(r not in output["evidence_refs"] for r in refs):
+            claim_prob(i, "UNKNOWN_EVIDENCE_REF")
+    return {"schema_version": output.get("schema_version", "?"),
             "valid": not problems, "problems": problems,
-            "claims": parsed_claims}
+            "claims": [{"claim_id": c.get("claim_id", "?") if isinstance(c, dict) else "?",
+                        "index": i} for i, c in enumerate(output["claims"])]}
+
+
+def check_component_inputs(role: str, inputs: dict) -> dict:
+    """§D2A-D — static input-permission boundary check. At component
+    input-assembly time, verify no denied material reaches the component.
+    `inputs` maps input kind → content (or None if not provided)."""
+    if role not in PIPELINE_ROLES:
+        return {"role": role, "boundary_ok": False,
+                "violations": ["UNKNOWN_ROLE:" + role]}
+    perm = PIPELINE_ROLES[role]
+    violations = []
+    for kind, content in inputs.items():
+        policy = perm.get(kind)
+        if policy is None:
+            violations.append("UNKNOWN_INPUT_KIND:" + kind)
+        elif policy == "denied":
+            if content is not None:
+                violations.append("FORBIDDEN_INPUT:" + kind)
+        elif policy == "locator-check only":
+            # source paper: locator/digest metadata only — full text
+            # (or any other key) is a boundary violation
+            if not isinstance(content, dict):
+                violations.append("FORBIDDEN_FULL_TEXT:" + kind)
+            elif set(content) - {"locator", "digest"}:
+                violations.append("FORBIDDEN_FULL_TEXT:" + kind)
+            elif not content.get("locator") or not content.get("digest"):
+                violations.append("INCOMPLETE_LOCATOR_CHECK:" + kind)
+    return {"role": role, "boundary_ok": not violations,
+            "violations": violations}
+
+
+def validate_human_review(record, *, claim_id: str, documents: dict,
+                          anchor_doc_ids: list) -> dict:
+    """§D2A-A — structured Human Review Record validation: reviewer
+    identity, claim binding, document digest binding, global-absence and
+    source-importance verdicts, rationale and review scope are ALL
+    mandatory. Digest mismatch in the record is an integrity failure —
+    an invalid record can never produce VERIFIED."""
+    problems = []
+    if not isinstance(record, dict):
+        return {"valid": False,
+                "problems": ["REVIEW_RECORD_NOT_OBJECT"]}
+    for field in REVIEW_RECORD_FIELDS:
+        if field not in record or record[field] in (None, ""):
+            problems.append(f"MISSING_FIELD:{field}")
+    if record.get("claim_id") != claim_id:
+        problems.append("CLAIM_ID_MISMATCH")
+    reviewer = record.get("reviewer_id")
+    if not isinstance(reviewer, str) or not reviewer.strip():
+        problems.append("REVIEWER_ID_INVALID")
+    digests = record.get("document_digests")
+    if not isinstance(digests, dict) or not digests:
+        problems.append("REVIEW_DIGESTS_MISSING")
+    elif isinstance(digests, dict):
+        for doc_id in anchor_doc_ids:
+            if doc_id not in digests:
+                problems.append("REVIEW_DIGEST_MISSING:" + doc_id)
+            elif digests[doc_id] != sha256(documents[doc_id]):
+                problems.append("REVIEW_DIGEST_MISMATCH:" + doc_id)
+    if record.get("global_absence_verdict") not in REVIEW_ABSENCE_VERDICTS:
+        problems.append("UNKNOWN_ABSENCE_VERDICT")
+    if record.get("source_importance_verdict") not in \
+            REVIEW_IMPORTANCE_VERDICTS:
+        problems.append("UNKNOWN_IMPORTANCE_VERDICT")
+    return {"valid": not problems, "problems": problems}
 
 
 def resolve_claim_evidence(claim: dict, judge_evidence_refs: dict,
@@ -166,24 +284,45 @@ def resolve_claim_evidence(claim: dict, judge_evidence_refs: dict,
 def verify_info_loss(*, claim_id: str, original_note_anchor: dict,
                      absence_evidence: dict, source_importance: dict,
                      documents: dict, original_note: str,
-                     perturbed_note: str, human_review: bool = False) -> dict:
-    """§B2 — ClaimVerifier: information-loss verification from THREE
-    evidences.
+                     perturbed_note: str, source_paper: str,
+                     human_review_record: dict | None = None) -> dict:
+    """§B2 + §D2A-A/B — ClaimVerifier: information-loss verification from
+    THREE evidences.
     1. Original Note Evidence — anchor quote must exist in the original
        note (digest-bound, fail-closed).
     2. Perturbed Note Absence — local: anchor quote absent from the
        perturbed note (markdown-normalized); global: no equivalent info
        elsewhere — machine layer is a lexical probe only, never
-       confirming ⇒ human review unless a recorded human review exists.
+       confirming ⇒ a valid structured Human Review Record is required.
     3. Source Paper Importance — semantic judgment against the source
-       paper ⇒ machine-decidable only with a recorded human review;
-       otherwise PENDING_HUMAN_REVIEW.
-    Fail-closed: any FAILED evidence ⇒ FAILED; any undecided ⇒
-    PENDING_HUMAN_REVIEW; VERIFIED only when all three are confirmed."""
+       paper ⇒ decided by the record's verdict, not by record existence.
+    Document binding (§D2A-B): the note/source texts passed for probing
+    must byte-equal the registered document texts bound into `documents`;
+    version mixing is fail-closed (DOCUMENT_VERSION_CONFLICT).
+    Decision rules (fail-closed):
+    - any FAILED evidence or binding conflict ⇒ FAILED
+    - invalid/absent review record, or uncertain verdicts ⇒
+      PENDING_HUMAN_REVIEW
+    - negative verdicts (absence REFUTED, importance NOT_IMPORTANT) ⇒
+      FAILED
+    - VERIFIED only when: no failure, valid record, record verdicts
+      CONFIRMED+IMPORTANT, machine-confirmed global lexical absence, and
+      local absence holds."""
+    binding_problems = []
+    for anchor, text, label in ((original_note_anchor, original_note,
+                                 "original_note"),
+                                (absence_evidence, perturbed_note,
+                                 "perturbed_note"),
+                                (source_importance, source_paper,
+                                 "source_paper")):
+        doc_id = anchor.get("document_id")
+        if doc_id in documents and documents[doc_id] != text:
+            binding_problems.append("DOCUMENT_VERSION_CONFLICT:" + label)
     ev_original = validate_anchor(original_note_anchor, documents)
     ev_absence = validate_anchor(absence_evidence, documents)
     ev_importance = validate_anchor(source_importance, documents)
-    if ev_original["verification_status"] == "VERIFIED":
+    if ev_original["verification_status"] == "VERIFIED" and \
+            not binding_problems:
         in_perturbed = quote_match(original_note_anchor["quote"],
                                    perturbed_note, "markdown_normalized")
         local_absence = not in_perturbed
@@ -202,11 +341,26 @@ def verify_info_loss(*, claim_id: str, original_note_anchor: dict,
     statuses = [ev_original["verification_status"],
                 ev_absence["verification_status"],
                 ev_importance["verification_status"]]
-    if "FAILED" in statuses or any(
-            r["problems"] for r in (ev_original, ev_absence, ev_importance)):
+    review = validate_human_review(
+        human_review_record, claim_id=claim_id, documents=documents,
+        anchor_doc_ids=[original_note_anchor["document_id"],
+                        absence_evidence["document_id"],
+                        source_importance["document_id"]])
+    if "FAILED" in statuses or binding_problems or \
+            any(r["problems"] for r in
+                (ev_original, ev_absence, ev_importance)):
         status = "FAILED"
-    elif human_review and global_absence_machine:
-        # recorded human review + machine-confirmed global lexical absence
+    elif not review["valid"]:
+        # record existence alone is never sufficient; unclear ⇒ PENDING
+        status = "PENDING_HUMAN_REVIEW"
+    elif human_review_record.get("global_absence_verdict") == "REFUTED" or \
+            human_review_record.get("source_importance_verdict") == \
+            "NOT_IMPORTANT":
+        status = "FAILED"
+    elif (human_review_record.get("global_absence_verdict") == "CONFIRMED"
+          and human_review_record.get("source_importance_verdict") ==
+          "IMPORTANT"
+          and global_absence_machine and local_absence):
         status = "VERIFIED"
     else:
         status = "PENDING_HUMAN_REVIEW"
@@ -221,14 +375,17 @@ def verify_info_loss(*, claim_id: str, original_note_anchor: dict,
             "global_absence_machine_confirmed": global_absence_machine,
         },
         "evidence_source_importance": {
-            **ev_importance, "note": "semantic judgment; machine layer "
-                                     "requires recorded human review",
+            **ev_importance, "note": "semantic judgment; decided by the "
+                                     "recorded human review verdict",
         },
+        "review_record_validation": review,
         "verification_status": status,
         "record": {"claim_id": claim_id,
                    "scope_digest": {"original_note": sha256(original_note),
-                                    "perturbed_note": sha256(perturbed_note)},
-                   "human_review_recorded": human_review},
+                                    "perturbed_note": sha256(perturbed_note),
+                                    "source_paper": sha256(source_paper)},
+                   "document_binding_problems": binding_problems,
+                   "human_review_recorded": review["valid"]},
     }
 
 

@@ -21,9 +21,10 @@ sys.path.insert(0, "/home/ktl/projects/ai_papers/src")
 
 from poc.r7_contract import (  # noqa: E402
     JUDGE_SCHEMA_VERSION, PIPELINE_ROLES, VERIFICATION_EVIDENCE_FIELDS,
-    INFO_LOSS_ANCHOR_ROLES, markdown_normalize, resolve_claim_evidence,
-    sha256, validate_anchor, validate_claim, validate_judge_output,
-    verify_absence, verify_info_loss,
+    INFO_LOSS_ANCHOR_ROLES, markdown_normalize, check_component_inputs,
+    resolve_claim_evidence, sha256, validate_anchor, validate_claim,
+    validate_human_review, validate_judge_output, verify_absence,
+    verify_info_loss,
 )
 
 # synthetic development texts (from approved R6I fixture content)
@@ -179,7 +180,8 @@ def test_judge_output_v03_valid():
 
 
 def test_judge_output_forbidden_fields_rejected():
-    # judge must not assert source importance or verification status
+    # strict allow-list: judge must not assert source importance or
+    # verification status — extra fields are rejected outright
     out = judge_output(claims=[{
         "claim_id": "c-1", "kind": "numeric_error", "target_side": "B",
         "claim_text": "x", "observed_evidence_refs": ["e-1"],
@@ -187,7 +189,7 @@ def test_judge_output_forbidden_fields_rejected():
         "verification_status": "VERIFIED"}])
     r = validate_judge_output(out)
     assert not r["valid"]
-    assert any("JUDGE_FORBIDDEN_FIELD" in p for p in r["problems"])
+    assert any("EXTRA_FIELD_FORBIDDEN" in p for p in r["problems"])
 
 
 def test_judge_abstention_requires_undecidable():
@@ -226,78 +228,190 @@ def test_resolver_digest_bound_record():
     assert rec["verification_status"] == "VERIFIED"
 
 
+LOSS_ANCHORS = dict(
+    original_note_anchor=d("orig", ORIGINAL, "original_note",
+                           "The first algorithmic step involves extracting "
+                           "keywords from the input document using the "
+                           "TextRank algorithm.", "markdown_normalized"),
+    absence_evidence=d("pert", PERTURBED, "perturbed_note",
+                       "Captions average 30.7 characters in length,"),
+    source_importance=d("source", SOURCE, "source_paper",
+                        "TextRank keyword extraction is a mandatory "
+                        "pipeline step", "semantic_review"),
+)
+
+
+def loss_call(**kw):
+    base = dict(claim_id="c-loss-1", documents=DOCS,
+                original_note=ORIGINAL, perturbed_note=PERTURBED,
+                source_paper=SOURCE, **LOSS_ANCHORS)
+    base.update(kw)
+    return verify_info_loss(**base)
+
+
+def review_record(gav="CONFIRMED", siv="IMPORTANT", digests=None,
+                  claim_id="c-loss-1", **overrides):
+    rec = {"reviewer_id": "reviewer-1", "claim_id": claim_id,
+           "document_digests": digests or {
+               "orig": sha256(ORIGINAL), "pert": sha256(PERTURBED),
+               "source": sha256(SOURCE)},
+           "global_absence_verdict": gav,
+           "source_importance_verdict": siv,
+           "rationale": "deletion confirmed at mapped position; importance "
+                        "confirmed against the source paper",
+           "review_scope": "full original + perturbed notes + source paper"}
+    rec.update(overrides)
+    return rec
+
+
 def test_info_loss_three_evidence_full_chain():
-    r = verify_info_loss(
-        claim_id="c-loss-1",
-        original_note_anchor=d("orig", ORIGINAL, "original_note",
-                               "The first algorithmic step involves "
-                               "extracting keywords from the input "
-                               "document using the TextRank algorithm.",
-                               "markdown_normalized"),
-        absence_evidence=d("pert", PERTURBED, "perturbed_note",
-                           "Captions average 30.7 characters in length,"),
-        source_importance=d("source", SOURCE, "source_paper",
-                            "TextRank keyword extraction is a mandatory "
-                            "pipeline step", "semantic_review"),
-        documents=DOCS, original_note=ORIGINAL, perturbed_note=PERTURBED,
-        human_review=False)
+    r = loss_call()  # no review record → uncertain, never VERIFIED
     assert r["evidence_original_note"]["verification_status"] == "VERIFIED"
     assert r["evidence_perturbed_absence"]["local_absence"] is True
-    assert r["verification_status"] == "PENDING_HUMAN_REVIEW"  # no review
+    assert r["verification_status"] == "PENDING_HUMAN_REVIEW"
 
 
-def test_info_loss_verified_with_recorded_human_review():
-    r = verify_info_loss(
-        claim_id="c-loss-1",
-        original_note_anchor=d("orig", ORIGINAL, "original_note",
-                               "The first algorithmic step involves "
-                               "extracting keywords from the input "
-                               "document using the TextRank algorithm.",
-                               "markdown_normalized"),
-        absence_evidence=d("pert", PERTURBED, "perturbed_note",
-                           "Captions average 30.7 characters in length,"),
-        source_importance=d("source", SOURCE, "source_paper",
-                            "TextRank keyword extraction is a mandatory "
-                            "pipeline step", "semantic_review"),
-        documents=DOCS, original_note=ORIGINAL, perturbed_note=PERTURBED,
-        human_review=True)
+def test_info_loss_verified_with_structured_review_record():
+    r = loss_call(human_review_record=review_record())
     assert r["verification_status"] == "VERIFIED"
+    assert r["review_record_validation"]["valid"] is True
     assert r["record"]["human_review_recorded"] is True
 
 
+# ------------------- §D2A-E negative regression matrix ----------------------
+def test_neg1_record_without_verdicts_is_pending():
+    # record exists but verdicts missing → PENDING, never VERIFIED
+    rec = review_record(gav=None, siv=None)
+    assert not validate_human_review(
+        rec, claim_id="c-loss-1", documents=DOCS,
+        anchor_doc_ids=["orig", "pert", "source"])["valid"]
+    r = loss_call(human_review_record=rec)
+    assert r["verification_status"] == "PENDING_HUMAN_REVIEW"
+
+
+def test_neg2_negative_global_absence_verdict_fails():
+    r = loss_call(human_review_record=review_record(gav="REFUTED"))
+    assert r["verification_status"] == "FAILED"
+
+
+def test_neg3_uncertain_source_importance_is_pending():
+    r = loss_call(human_review_record=review_record(siv="UNCERTAIN"))
+    assert r["verification_status"] == "PENDING_HUMAN_REVIEW"
+
+
+def test_neg4_review_record_digest_mismatch():
+    bad_digests = review_record().get("document_digests").copy()
+    bad_digests["pert"] = "sha256:deadbeef"
+    rec = review_record(digests=bad_digests)
+    v = validate_human_review(rec, claim_id="c-loss-1", documents=DOCS,
+                              anchor_doc_ids=["orig", "pert", "source"])
+    assert any("REVIEW_DIGEST_MISMATCH:pert" in p for p in v["problems"])
+    # integrity failure → cannot VERIFY
+    r = loss_call(human_review_record=rec)
+    assert r["verification_status"] == "PENDING_HUMAN_REVIEW"
+
+
+def test_neg5_registered_document_text_mismatch_fail_closed():
+    # documents registry built from a different perturbed-note version
+    docs2 = dict(DOCS, pert=PERTURBED.replace("12,000", "13,000"))
+    r = verify_info_loss(claim_id="c-loss-1",
+                         **{k: v for k, v in LOSS_ANCHORS.items()},
+                         documents=docs2, original_note=ORIGINAL,
+                         perturbed_note=PERTURBED, source_paper=SOURCE,
+                         human_review_record=review_record())
+    assert any("DOCUMENT_VERSION_CONFLICT:perturbed_note" in p
+               for p in r["record"]["document_binding_problems"])
+    assert r["verification_status"] == "FAILED"
+
+
+def test_neg6_judge_extra_top_level_field_rejected():
+    out = judge_output(gold_verdict="VALID")  # non-allow-list field
+    r = validate_judge_output(out)
+    assert not r["valid"]
+    assert any("EXTRA_FIELD_FORBIDDEN:gold_verdict" in p
+               for p in r["problems"])
+
+
+def test_neg7_evidence_ref_not_in_judge_evidence_list():
+    out = judge_output(evidence_refs=[])  # claim refs e-1, list empty
+    r = validate_judge_output(out)
+    assert not r["valid"]
+    assert any("UNKNOWN_EVIDENCE_REF" in p or
+               "OBSERVED_EVIDENCE_REFS_REQUIRED" in p
+               for p in r["problems"])
+    out2 = judge_output(evidence_refs=["e-other"])
+    r2 = validate_judge_output(out2)
+    assert not r2["valid"]
+    assert any("UNKNOWN_EVIDENCE_REF" in p for p in r2["problems"])
+
+
+def test_neg8_gold_passed_to_judge_boundary_violation():
+    r = check_component_inputs("SemanticJudge",
+                               {"ab_note": "A/B notes", "gold": "leak!"})
+    assert not r["boundary_ok"]
+    assert "FORBIDDEN_INPUT:gold" in r["violations"]
+    # clean judge input passes
+    ok = check_component_inputs("SemanticJudge", {"ab_note": "A/B notes"})
+    assert ok["boundary_ok"]
+    # resolver source access: locator/digest metadata only
+    ok2 = check_component_inputs(
+        "EvidenceResolver",
+        {"source_paper": {"locator": "para:3", "digest": sha256(SOURCE)}})
+    assert ok2["boundary_ok"]
+    full = check_component_inputs("EvidenceResolver",
+                                  {"source_paper": SOURCE})
+    assert not full["boundary_ok"]
+    assert any("FORBIDDEN_FULL_TEXT" in v for v in full["violations"])
+
+
 def test_info_loss_info_present_elsewhere_never_machine_verified():
-    # same info remains elsewhere in the perturbed note → even with a
-    # recorded human review, VERIFIED is forbidden (global absence fails)
+    # same info remains elsewhere in the perturbed note → even a valid
+    # review record cannot VERIFY (machine global absence fails)
     pert = PERTURBED + " TextRank supplies the keyword centroids."
-    r = verify_info_loss(
-        claim_id="c-loss-1",
-        original_note_anchor=d("orig", ORIGINAL, "original_note",
-                               "The first algorithmic step involves "
-                               "extracting keywords from the input "
-                               "document using the TextRank algorithm.",
-                               "markdown_normalized"),
-        absence_evidence=d("pert", PERTURBED, "perturbed_note",
-                           "Captions average 30.7 characters in length,"),
-        source_importance=d("source", SOURCE, "source_paper",
-                            "TextRank keyword extraction is a mandatory "
-                            "pipeline step", "semantic_review"),
-        documents=DOCS, original_note=ORIGINAL, perturbed_note=pert,
-        human_review=True)
+    docs = dict(DOCS, pert=pert)  # registry must match the probed text
+    anchors = dict(LOSS_ANCHORS,
+                   absence_evidence=d("pert", pert, "perturbed_note",
+                                      "Captions average 30.7 characters "
+                                      "in length,"))
+    rec = review_record(digests={"orig": sha256(ORIGINAL),
+                                 "pert": sha256(pert),
+                                 "source": sha256(SOURCE)})
+    r = loss_call(perturbed_note=pert, documents=docs,
+                  human_review_record=rec, **anchors)
     assert r["evidence_perturbed_absence"][
         "global_absence_machine_confirmed"] is False
     assert r["verification_status"] == "PENDING_HUMAN_REVIEW"
 
 
 def test_info_loss_fabricated_anchor_fail_closed():
-    r = verify_info_loss(
+    r = loss_call(
         claim_id="c-fab",
         original_note_anchor=d("orig", ORIGINAL, "original_note",
                                "The model was trained for 300 epochs.",
                                "byte_exact"),
-        absence_evidence=d("pert", PERTURBED, "perturbed_note",
-                           "Captions average 30.7 characters in length,"),
-        source_importance=d("source", SOURCE, "source_paper",
-                            "TextRank keyword extraction", "semantic_review"),
-        documents=DOCS, original_note=ORIGINAL, perturbed_note=PERTURBED,
-        human_review=True)
+        human_review_record=review_record(claim_id="c-fab"))
     assert r["verification_status"] == "FAILED"  # QUOTE_ABSENT fail-closed
+
+
+def test_judge_strict_validation_types_and_duplicates():
+    # duplicate claim ids rejected
+    dup = {"claim_id": "c-1", "kind": "numeric_error", "target_side": "B",
+           "claim_text": "x", "observed_evidence_refs": ["e-1"]}
+    r = validate_judge_output(judge_output(claims=[dup, dict(dup)]))
+    assert not r["valid"]
+    assert any("DUPLICATE_CLAIM_ID" in p for p in r["problems"])
+    # wrong types rejected
+    r2 = validate_judge_output(judge_output(abstention=1))
+    assert not r2["valid"]
+    assert any("ABSTENTION_NOT_BOOLEAN" in p for p in r2["problems"])
+    # length limit enforced
+    long_c = dict(dup, claim_text="x" * 201)
+    r3 = validate_judge_output(judge_output(claims=[long_c]))
+    assert not r3["valid"]
+    assert any("CLAIM_TEXT_TOO_LONG" in p for p in r3["problems"])
+    # abstention requires abstained verdicts
+    r4 = validate_judge_output(judge_output(abstention=True,
+                                            relative="UNDECIDABLE"))
+    assert not r4["valid"]
+    assert any("ABSTENTION_REQUIRES_ABSTAINED_VERDICTS" in p
+               for p in r4["problems"])
