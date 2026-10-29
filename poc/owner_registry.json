@@ -1,5 +1,9 @@
 {
  "schema": "rrsi-owner-registry/v0.1",
+ "semantics": {
+  "note": "identity matching here verifies a REGISTERED APPROVER IDENTIFIER (who the approval record claims to act for matches the registry). It is NOT independent identity authentication: there is no cryptographic identity proof, PKI, or external IdP. This pilot runs under a TRUSTED LOCAL EXECUTION ENVIRONMENT premise; no operational-security-grade authentication is provided or claimed.",
+  "binding": "the approval record additionally binds invocation id, scope (workstream, call_type, paper_ids) and its file digest into the permit"
+ },
  "owners": [
   {
    "identity": "Hongseok Lee",

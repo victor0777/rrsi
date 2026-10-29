@@ -148,21 +148,30 @@ def test_g7_claim_verification_pending_human_review():
                                         full_note=PERTURBED_G7.read_text(),
                                         unblind_map={"A": "original",
                                                      "B": "perturbed"})
-    # the full perturbed note still contains the methodology core, and the
-    # P5 target bullet is genuinely absent — the automated check cannot
-    # separate perturbation loss from excerpt loss on claims, so pending.
-    assert res["methodology_core_intact_in_full_note"]
-    assert res["p5_target_absent_from_full_note"]
+    # a loss claim with NO specific omission items stays pending; the P5
+    # item (textrank_functional) is genuinely absent while other items
+    # (use_functional, mapping, combined score, Sim1/Sim2, results)
+    # remain in the full note — partial loss is the true state.
     assert res["claims_loss"] is True
+    assert res["missing_items_claimed"] == []
+    item_verification = res["item_verification"]
+    assert item_verification["textrank_functional"][
+        "content_absent_from_full_note"] is True
+    assert item_verification["use_functional"][
+        "content_absent_from_full_note"] is False
+    assert item_verification["initial_sentence_mapping"][
+        "content_absent_from_full_note"] is False
     assert res["result_status"] == "PENDING_HUMAN_REVIEW"
     assert res["semantic_success"] is False
     assert res["disagreement_auto_truth"] is False
 
 
 def test_g7_verification_sufficient_when_core_gone():
-    # a note without any methodology category must verify as sufficient
+    # a loss claim with cited items, none present in the full note
     res = verify_g7_claims_vs_full_note(
-        judge={"relative": "A"}, full_note="nothing here",
+        judge={"relative": "A",
+               "missing": ["textrank_functional", "use_functional"]},
+        full_note="nothing here",
         unblind_map={"A": "original", "B": "perturbed"})
     assert res["result_status"] == "VERIFIED"
     assert res["semantic_success"] is True
@@ -271,12 +280,13 @@ def test_issued_permit_passes_assert_authorized(monkeypatch, tmp_path):
     """P0-1: a permit issued by the owner issuer must verify against the
     EXISTING execution_permit contract (no schema weakening)."""
     import poc.owner_issue_permit as issuer
-    monkeypatch.setattr(issuer, "WORK_ROOT", tmp_path / "work")
-    # keep the test out of the real issuance ledger
     monkeypatch.setattr("poc.execution_permit.issuance_ledger_path",
                         lambda: tmp_path / "issuance.jsonl")
-    issued = issuer.issue(approval_record=None)  # structural permit only
+    issued = issuer.issue_test_only(tmp_root=tmp_path)
     permit_path = Path(issued["permit"])
+    # the runner-side check requires the exact bytes to have been issued:
+    from poc.execution_permit import register_permit
+    register_permit(permit_path, issued_by="test-only registration")
     monkeypatch.setenv("AI_PAPERS_EXECUTION_PERMIT", str(permit_path))
     for k, v in issued["budget_env"].items():
         monkeypatch.setenv(k, v)
@@ -291,6 +301,97 @@ def test_issued_permit_passes_assert_authorized(monkeypatch, tmp_path):
         endpoint="http://127.0.0.1:8004/v1",
         invocation_id="semjudge-r6i-g4g7")
     assert "PERMIT_BUDGET" in verified["checks"]
+
+
+def test_issuance_requires_valid_approval_record(monkeypatch, tmp_path):
+    """§1 — permit issuance without a valid approval record is refused;
+    the record-free path exists only as the isolated test-only function."""
+    import poc.owner_issue_permit as issuer
+    with pytest.raises(PermissionError):
+        issuer.issue(approval_record_path="")
+    with pytest.raises(PermissionError):
+        issuer.issue(approval_record_path="/nonexistent/record.json")
+    # forged approver identity: record exists, authority does not
+    from poc.semantic_pilot_r6i import INVOCATION_ID
+    monkeypatch.setattr("poc.semantic_pilot_r6i.OWNER_REGISTRY",
+                        tmp_path / "registry.json")
+    (tmp_path / "registry.json").write_text(json.dumps(
+        {"owners": [{"identity": "Hongseok Lee", "authority": True}]}))
+    forged = tmp_path / "forged.json"
+    forged.write_text(json.dumps({
+        "invocation_id": INVOCATION_ID, "approved_by": "mystery-user",
+        "approval_reference": "x",
+        "scope": issuer.PERMIT_SCOPE, "workstream": "semantic_judge_pilot"}))
+    with pytest.raises(PermissionError) as exc:
+        issuer.issue(approval_record_path=str(forged))
+    assert "OWNER_APPROVAL_AUTHORITY_UNVERIFIED" in str(exc.value)
+    # scope mismatch: valid authority, wrong scope
+    from poc.owner_issue_permit import PERMIT_SCOPE
+    mismatched = tmp_path / "scope.json"
+    mismatched.write_text(json.dumps({
+        "invocation_id": INVOCATION_ID, "approved_by": "Hongseok Lee",
+        "approval_reference": "x",
+        "scope": {**PERMIT_SCOPE, "paper_ids": ["0000.00000"]},
+        "workstream": "semantic_judge_pilot"}))
+    with pytest.raises(PermissionError) as exc:
+        issuer.issue(approval_record_path=str(mismatched))
+    assert "RECORD_SCOPE_MISMATCH" in str(exc.value)
+    # a fully valid record issues
+    good = tmp_path / "good.json"
+    good.write_text(json.dumps({
+        "invocation_id": INVOCATION_ID, "approved_by": "Hongseok Lee",
+        "approval_reference": "r6i directive",
+        "scope": PERMIT_SCOPE, "workstream": "semantic_judge_pilot"}))
+    monkeypatch.setattr("poc.execution_permit.issuance_ledger_path",
+                        lambda: tmp_path / "issuance.jsonl")
+    monkeypatch.setattr(issuer, "BUDGET_ROOT", tmp_path / "wbudget")
+    monkeypatch.setattr(issuer, "PERMIT_PATH", tmp_path / "wpermit.json")
+    issued = issuer.issue(approval_record_path=str(good))
+    assert Path(issued["permit"]).exists()
+    assert issued["issuance"]["event"] == "execution_permit_issued"
+
+
+def test_g7_partial_loss_claim_verified():
+    """§3 — a judge that correctly identifies the PARTIAL loss (TextRank's
+    own functional explanation + keyword-extraction body) succeeds even
+    though other methodology explanations remain in the full note."""
+    rec = {"fixture_id": "g7-1901-method",
+           "dimension": "Partial Required Information Coverage Loss",
+           "pair": {"A_text": "A", "B_text": "B",
+                    "unblind_map": {"A": "original", "B": "perturbed"}}}
+    raw = json.dumps({"relative": "A", "a_verdict": "high",
+                      "b_verdict": "low",
+                      "ev_a": ["step"], "ev_b": ["tool named"],
+                      "missing": ["textrank_functional",
+                                  "keyword_extraction_body"]})
+    res = adjudicate_response(fid="g7-1901-method", raw=raw, rec=rec,
+                              full_perturbed_note=PERTURBED_G7.read_text())
+    cv = res["claim_verification"]
+    assert cv["claims_loss"] is True
+    assert cv["result_status"] == "VERIFIED"
+    assert cv["semantic_success"] is True
+    assert res["result_status"] == "AGREEMENT"  # separate from success
+    assert res["semantic_success"] is True
+
+
+def test_g7_over_claim_rejected():
+    """§3 — a judge claiming intact methodology items are also missing is
+    never a success."""
+    rec = {"fixture_id": "g7-1901-method",
+           "dimension": "Partial Required Information Coverage Loss",
+           "pair": {"A_text": "A", "B_text": "B",
+                    "unblind_map": {"A": "original", "B": "perturbed"}}}
+    raw = json.dumps({"relative": "A", "a_verdict": "high",
+                      "b_verdict": "low",
+                      "ev_a": ["step"], "ev_b": ["tool named"],
+                      "missing": ["textrank_functional", "sim1_sim2",
+                                  "combined_similarity_score"]})
+    res = adjudicate_response(fid="g7-1901-method", raw=raw, rec=rec,
+                              full_perturbed_note=PERTURBED_G7.read_text())
+    cv = res["claim_verification"]
+    assert cv["result_status"] == "OVER_CLAIM_REJECTED"
+    assert "sim1_sim2" in cv["over_claimed_items"]
+    assert cv["semantic_success"] is False
 
 
 def test_runner_does_not_issue_permit_itself():
@@ -365,7 +466,8 @@ def test_semantic_success_separate_from_verified_status():
     res = adjudicate_response(
         fid="g7-1901-method",
         raw=json.dumps({"relative": "A", "a_verdict": "high",
-                        "b_verdict": "low", "ev_a": ["x"], "ev_b": ["y"]}),
+                        "b_verdict": "low", "ev_a": ["x"], "ev_b": ["y"],
+                        "missing": ["textrank_functional"]}),
         rec=rec, full_perturbed_note=no_core)
     assert res["claim_verification"]["result_status"] == "VERIFIED"
     assert res["claim_verification"]["claims_loss"] is True

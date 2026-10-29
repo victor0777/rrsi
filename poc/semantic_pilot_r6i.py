@@ -105,8 +105,46 @@ V2_TEMPLATE = (
     ' "a_verdict": "high"|"medium"|"low",\n'
     ' "b_verdict": "high"|"medium"|"low",\n'
     ' "ev_a": ["max 2 phrases, each max 120 chars quoting Document A"],\n'
-    ' "ev_b": ["max 2 phrases, each max 120 chars quoting Document B"]}\n'
+    ' "ev_b": ["max 2 phrases, each max 120 chars quoting Document B"],\n'
+    ' "missing": ["optional; for g7 loss claims only: which required '
+    'methodology items are missing from the judged note — cite item keys '
+    'from the item registry"]}\n'
     "No prose outside the JSON. No self-correction.")
+
+# §3 — g7 claim-item registry: each key is a SPECIFIC methodology item the
+# judge may claim to be missing; absence is verified against the FULL
+# perturbed note by the item's functional-content regex. Partial loss
+# (e.g. TextRank's own functional explanation gone while USE, Initial
+# Sentence Mapping, Combined Similarity Score, Sim1/Sim2, results remain)
+# is a VALID evaluation target: other explanations remaining never fails a
+# claim — only over-claimed items do.
+G7_CLAIM_ITEMS = {
+    "textrank_functional": (
+        "TextRank's dedicated functional explanation (keyword extraction "
+        "and ranking; graph-based ranking mechanism)",
+        r"originally designed for keyword extraction and ranking"),
+    "keyword_extraction_body": (
+        "the keyword-extraction pipeline body (first algorithmic step, "
+        "keywords stored in list $K$, keywords as centroids)",
+        r"first algorithmic step involves extracting keywords"),
+    "use_functional": (
+        "USE's functional explanation (embeddings for semantic similarity)",
+        r"generates vector representations"),
+    "initial_sentence_mapping": (
+        "Initial Sentence Mapping (most relevant sentence per keyword, "
+        "cosine similarity)",
+        r"most relevant sentence for each keyword"),
+    "combined_similarity_score": (
+        "Combined Similarity Score S(x,y) (weighted keyword + cluster "
+        "coherence)",
+        r"weighted similarity score|similarity of a sentence with the "
+        r"keyword"),
+    "sim1_sim2": ("Evaluation Metrics Sim1/Sim2", r"Sim1"),
+    "experiment_results": (
+        "experimental results summaries (500 Wikipedia documents, baseline "
+        "comparison)",
+        r"500 randomly shuffled Wikipedia|Baseline Model"),
+}
 
 # §C — g7 methodology collection: categories from the directive. The SAME
 # regex is applied to both notes; matched paragraphs are ALL collected
@@ -225,6 +263,13 @@ def validate_v2_output(obj: dict) -> dict:
     for side in ("ev_a", "ev_b"):
         if not (obj.get(side) or []):
             return {"valid": False, "error": f"EVIDENCE_REFERENCES_REQUIRED:{side}"}
+    missing = obj.get("missing")
+    if missing is not None:
+        if obj["relative"] == "abstain":
+            return {"valid": False, "error": "MISSING_ON_ABSTAIN"}
+        if not isinstance(missing, list) or not missing or \
+                any(m not in G7_CLAIM_ITEMS for m in missing):
+            return {"valid": False, "error": "MISSING_ITEMS_UNKNOWN"}
     return {"valid": True, "abstained": obj["relative"] == "abstain"}
 
 
@@ -486,45 +531,55 @@ def _citation_accuracy(judge: dict, rec: dict) -> dict:
 
 def verify_g7_claims_vs_full_note(*, judge: dict, full_note: str,
                                   unblind_map: dict) -> dict:
-    """§B — judge's claimed methodology omissions must hold against the FULL
-    perturbed note. The v2 contract carries no free-text omission list, so
-    the automated check is bounded: (a) the known P5 target loss is
-    genuinely absent from the full note; (b) the methodology inventory per
-    directive category. VERIFIED is a CLAIM-VERIFICATION status only —
-    semantic_success is recorded ONLY when the judge makes a loss claim
-    (relative == perturbed slot, from the manifest's unblind_map — no fixed
-    A/B assumption) AND that claim survives full-note verification. An
-    unverifiable claim keeps the fixture PENDING_HUMAN_REVIEW, never
-    aggregated as Semantic Success.
+    """§3 — the judge's SPECIFIC omission claims are verified item-by-item
+    against the FULL perturbed note. Partial loss is a valid target: e.g.
+    TextRank's own functional explanation may be genuinely gone while USE,
+    Initial Sentence Mapping, Combined Similarity Score, Sim1/Sim2 and
+    results remain — remaining explanations elsewhere never fail a claim.
+    The judge makes a loss claim by rating the ORIGINAL slot higher (no
+    fixed A/B assumption — unblind_map) and citing item keys in `missing`.
+    - No specific items cited  → PENDING_HUMAN_REVIEW, no success.
+    - Any cited item actually present in the full note (over-claim) →
+      claim rejected, no success.
+    - All cited items verified absent → claim valid; VERIFIED.
+    AGREEMENT (gold comparison) and semantic_success stay separate.
     """
-    inventory = {c: bool(re.search(rx, full_note))
-                 for c, rx in G7_CATEGORIES.items()}
-    target_absent = not bool(re.search(
-        r"originally designed for keyword extraction and ranking", full_note))
-    core_intact = all(inventory[c] for c in
-                      ("keyword_extraction", "initial_sentence_mapping",
-                       "combined_similarity_score", "sim1_sim2",
-                       "experiment_results"))
     original_slot = next(s for s, k in unblind_map.items() if k == "original")
-    # the judge rates the ORIGINAL side higher ⇒ claims the PERTURBED side
-    # lost required information (no fixed A/B assumption — unblind_map)
     claims_loss = judge["relative"] == original_slot
-    verified = claims_loss and target_absent and not core_intact
+    item_verification = {
+        key: {"description": desc,
+              "content_absent_from_full_note":
+                  not bool(re.search(rx, full_note))}
+        for key, (desc, rx) in G7_CLAIM_ITEMS.items()}
+    missing = judge.get("missing") or []
+    if not claims_loss:
+        status, success = "PENDING_HUMAN_REVIEW", False
+    elif not missing:
+        status, success = "PENDING_HUMAN_REVIEW", False
+    else:
+        over_claimed = [k for k in missing
+                        if not item_verification[k]
+                        ["content_absent_from_full_note"]]
+        if over_claimed:
+            status, success = "OVER_CLAIM_REJECTED", False
+        else:
+            status, success = "VERIFIED", True
     return {
-        "full_note_methodology_inventory": inventory,
-        "p5_target_absent_from_full_note": target_absent,
-        "methodology_core_intact_in_full_note": core_intact,
         "claims_loss": claims_loss,
-        "claim_verified_against_full_note": verified,
-        "automated_verification": "SUFFICIENT" if verified
+        "missing_items_claimed": missing,
+        "item_verification": item_verification,
+        "over_claimed_items": [k for k in missing
+                               if not item_verification[k]
+                               ["content_absent_from_full_note"]],
+        "automated_verification": "SUFFICIENT" if success
         else "INSUFFICIENT",
-        "result_status": ("VERIFIED" if verified
-                          else "PENDING_HUMAN_REVIEW"),
-        "semantic_success": verified,
+        "result_status": status,
+        "semantic_success": success,
         "disagreement_auto_truth": False,
-        "note": ("VERIFIED without a loss claim (equal/abstain/no-claim) "
-                 "records NO success; a PENDING_HUMAN_REVIEW fixture is "
-                 "never aggregated as Semantic Success"),
+        "note": ("partial loss is a valid evaluation target; remaining "
+                 "methodology elsewhere never fails a claim — only over-"
+                 "claimed items do; no judge verdict or gold is promoted "
+                 "to truth"),
     }
 
 
@@ -533,7 +588,11 @@ OWNER_REGISTRY = RRSI_ROOT / "poc" / "owner_registry.json"
 
 def _registered_owner_authority(approved_by: str) -> bool:
     """P0-2 — authority is verified against a committed owner registry, NOT
-    inferred from the record file's existence."""
+    inferred from the record file's existence. SEMANTICS: this checks that
+    the claimed approver is a REGISTERED APPROVER IDENTIFIER — it is NOT
+    independent identity authentication (no crypto identity proof). Valid
+    under the trusted-local-execution-environment premise of this pilot;
+    no operational-security-grade authentication is provided or claimed."""
     if not OWNER_REGISTRY.exists():
         return False
     try:
