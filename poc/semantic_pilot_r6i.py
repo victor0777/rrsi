@@ -402,8 +402,162 @@ def prepare() -> dict:
     return report
 
 
+# ----------------------------------------------- §F adjudication (offline) --
+def strip_fences(raw: str) -> str:
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.startswith("json"):
+            text = text[4:]
+    return text
+
+
+def adjudicate_response(*, fid: str, raw: str, rec: dict,
+                        full_perturbed_note: str) -> dict:
+    """§F post-hoc adjudication. Distinct result statuses:
+    PARSE_FAILURE / INVALID_SCHEMA / ABSTAINED / AGREEMENT / DISAGREEMENT.
+
+    Gold agreement is computed ONLY for a valid (non-abstain) schema.
+    """
+    try:
+        judge = json.loads(strip_fences(raw))
+    except Exception:
+        return {"result_status": "PARSE_FAILURE", "judge_parsed": None,
+                "validation": {"valid": False, "error": "PARSE_FAILURE"},
+                "gold_agreement": None,
+                "evidence_references": None, "citation_accuracy": None,
+                "claim_verification": None, "semantic_success": False}
+    validation = validate_v2_output(judge)
+    if not validation.get("valid"):
+        return {"result_status": "INVALID_SCHEMA", "judge_parsed": judge,
+                "validation": validation, "gold_agreement": None,
+                "evidence_references": {"ev_a": judge.get("ev_a"),
+                                        "ev_b": judge.get("ev_b")},
+                "citation_accuracy": _citation_accuracy(judge, rec),
+                "claim_verification": None, "semantic_success": False}
+    if validation.get("abstained"):
+        return {"result_status": "ABSTAINED", "judge_parsed": judge,
+                "validation": validation,
+                "gold_agreement": {"agreement": "ABSTAINED",
+                                   "reason": judge.get("reason", ""),
+                                   "disagreement_auto_truth": False},
+                "evidence_references": {"ev_a": judge.get("ev_a"),
+                                        "ev_b": judge.get("ev_b")},
+                "citation_accuracy": _citation_accuracy(judge, rec),
+                "claim_verification": None, "semantic_success": False}
+    # P0-1: unblind_map lives at rec["pair"]["unblind_map"] in the manifest
+    unblind_map = rec["pair"]["unblind_map"]
+    perturbed_slot = next(s for s, k in unblind_map.items() if k == "perturbed")
+    rel = judge["relative"]
+    status = ("DISAGREEMENT" if rel in (perturbed_slot, "equal")
+              else "AGREEMENT")
+    result = {"result_status": status, "judge_parsed": judge,
+              "validation": validation,
+              "gold_agreement": {"agreement": ("Agreement"
+                                               if status == "AGREEMENT"
+                                               else "Disagreement"),
+                                 "gold_expected_direction":
+                                     GOLD_EXPECTED_DIRECTION[fid],
+                                 "judge_observed": rel,
+                                 "disagreement_auto_truth": False},
+              "evidence_references": {"ev_a": judge.get("ev_a"),
+                                      "ev_b": judge.get("ev_b")},
+              "citation_accuracy": _citation_accuracy(judge, rec),
+              "claim_verification": None, "semantic_success": False}
+    if fid == "g7-1901-method":
+        result["claim_verification"] = verify_g7_claims_vs_full_note(
+            judge=judge, full_note=full_perturbed_note)
+        result["semantic_success"] = bool(
+            result["claim_verification"].get("semantic_success"))
+    return result
+
+
+def _citation_accuracy(judge: dict, rec: dict) -> dict:
+    """§B: quoted evidence must exist in the presented excerpt (and, for the
+    perturbed side, in the FULL note — recorded separately)."""
+    checks = {}
+    for side, text_key in (("ev_a", "A_text"), ("ev_b", "B_text")):
+        refs = judge.get(side) or []
+        source = rec["pair"][text_key]
+        checks[side + "_in_excerpt"] = [r in source for r in refs]
+    return checks
+
+
+def verify_g7_claims_vs_full_note(*, judge: dict, full_note: str) -> dict:
+    """§B — judge's claimed methodology omissions must hold against the FULL
+    perturbed note. The v2 contract carries no free-text omission list, so
+    the automated check is bounded: (a) verify the known P5 target loss is
+    genuinely absent from the full note; (b) verify the methodology
+    inventory of the full note per directive category. If the judge rates
+    the perturbed side lower while the full note still contains the
+    methodology core, automated verification is insufficient — the fixture
+    is PENDING_HUMAN_REVIEW and is NOT counted as Semantic Success.
+    """
+    inventory = {c: bool(re.search(rx, full_note))
+                 for c, rx in G7_CATEGORIES.items()}
+    target_absent = not bool(re.search(
+        r"originally designed for keyword extraction and ranking", full_note))
+    core_intact = all(inventory[c] for c in
+                      ("keyword_extraction", "initial_sentence_mapping",
+                       "combined_similarity_score", "sim1_sim2",
+                       "experiment_results"))
+    claims_loss = judge["relative"] in ("A",)  # A higher ⇒ B lost info
+    if not claims_loss:
+        sufficient = True  # no omission claim to verify (equal/abstain path)
+    elif target_absent and not core_intact:
+        sufficient = True  # claimed loss is genuine at full-note level
+    else:
+        sufficient = False
+    return {
+        "full_note_methodology_inventory": inventory,
+        "p5_target_absent_from_full_note": target_absent,
+        "methodology_core_intact_in_full_note": core_intact,
+        "automated_verification": "SUFFICIENT" if sufficient
+        else "INSUFFICIENT",
+        "result_status": ("VERIFIED" if sufficient
+                          else "PENDING_HUMAN_REVIEW"),
+        "semantic_success": sufficient,
+        "disagreement_auto_truth": False,
+        "note": ("no judge verdict or gold is promoted to truth; a "
+                 "PENDING_HUMAN_REVIEW fixture is never aggregated as "
+                 "Semantic Success"),
+    }
+
+
+def verify_owner_approval_record(path: str) -> dict:
+    """§C — verify an owner-issued approval record; never create one.
+
+    The record must pre-exist, name this invocation, and carry an owner
+    identity. Runner vs. owner roles are kept distinct: provenance records
+    WHERE approval came from (owner record file, digest) and WHO executes
+    (this runner).
+    """
+    if not path:
+        return {"error": "OWNER_APPROVAL_REQUIRED"}
+    p = Path(path)
+    if not p.exists():
+        return {"error": f"OWNER_APPROVAL_RECORD_MISSING:{path}"}
+    try:
+        rec = json.loads(p.read_text())
+    except Exception as exc:
+        return {"error": f"OWNER_APPROVAL_RECORD_UNREADABLE:{exc}"}
+    if rec.get("invocation_id") != INVOCATION_ID:
+        return {"error": "OWNER_APPROVAL_INVOCATION_MISMATCH"}
+    if not rec.get("approved_by") or not rec.get("approval_reference"):
+        return {"error": "OWNER_APPROVAL_IDENTITY_INCOMPLETE"}
+    return {
+        "approval_source": "owner-record",
+        "approval_record_path": str(p),
+        "approval_record_sha256": digest_bytes(p.read_bytes()),
+        "approved_by": rec["approved_by"],
+        "approval_reference": rec["approval_reference"],
+        "executor_role": "runner (poc/run_r6i.py) — verification only, "
+                         "cannot self-approve",
+    }
+
+
 # -------------------------------------------------------------- execute -----
-def execute() -> dict:
+def execute(*, approval_record_path: str = "") -> dict:
     """Owner-approved execution; fails closed without matching permit+approval."""
     started = time.monotonic()
     report: dict = {"invocation_id": INVOCATION_ID,
@@ -419,13 +573,19 @@ def execute() -> dict:
 
     for var in ("AI_PAPERS_MODEL_CALL_BUDGET_LEDGER", "AI_PAPERS_MODEL_CALL_CEILING",
                 "AI_PAPERS_INVOCATION_ID", "AI_PAPERS_MODEL_CALL_BUDGET_ROOT",
-                "AI_PAPERS_EXECUTION_PERMIT", "AI_PAPERS_OWNER_APPROVAL"):
+                "AI_PAPERS_EXECUTION_PERMIT"):
         if var not in os.environ:
             return halt("EXECUTION_BUDGET_NOT_ISSUED", var)
-    if os.environ["AI_PAPERS_OWNER_APPROVAL"] != INVOCATION_ID:
-        return halt("OWNER_APPROVAL_MISMATCH")
     if os.environ["AI_PAPERS_INVOCATION_ID"] != INVOCATION_ID:
         return halt("INVOCATION_MISMATCH")
+    # §C — approval boundary: the runner NEVER self-approves. The approval
+    # record is an owner-issued file (referencing this invocation); the
+    # runner only verifies it and records provenance (source file + digest)
+    # with the executor role kept separate.
+    provenance = verify_owner_approval_record(approval_record_path)
+    if provenance.get("error"):
+        return halt("OWNER_APPROVAL_INVALID", provenance["error"])
+    report["approval_provenance"] = provenance
 
     from poc.execution_permit import assert_authorized
     from poc.run_dir_isolation import resolve_run_dir, seal_run_dir
@@ -504,63 +664,17 @@ def execute() -> dict:
         "g7-1901-method": PERTURBED["g7-1901-method"].read_text(),
     }
     for fid, rec in inputs.items():
-        raw = raw_packets[fid]["raw_output"]
         usage = raw_packets[fid]["usage"]
-        text = raw.strip()
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.startswith("json"):
-                text = text[4:]
-        try:
-            judge = json.loads(text)
-        except Exception:
-            judge = None
-        validation = validate_v2_output(judge) if judge else \
-            {"valid": False, "error": "PARSE_FAILURE"}
-        rel = (judge or {}).get("relative")
-        if rel == "abstain":
-            gold = {"agreement": "ABSTAINED",
-                    "reason": judge.get("reason", ""),
-                    "disagreement_auto_truth": False}
-        elif judge:
-            unblind_map = rec["unblind_map"]
-            perturbed_slot = next(s for s, k in unblind_map.items()
-                                  if k == "perturbed")
-            agree = rel not in (perturbed_slot, "equal")
-            gold = {"agreement": "Agreement" if agree else "Disagreement",
-                    "gold_expected_direction": GOLD_EXPECTED_DIRECTION[fid],
-                    "judge_observed": rel,
-                    "disagreement_auto_truth": False}
-        else:
-            gold = None
-        fx = report["fixtures"][fid] = {
+        result = adjudicate_response(
+            fid=fid, raw=raw_packets[fid]["raw_output"], rec=rec,
+            full_perturbed_note=full_perturbed[fid])
+        report["fixtures"][fid] = {
             "input_tokens": usage.get("prompt_tokens"),
             "output_tokens": usage.get("completion_tokens"),
-            "judge_verdict_raw": raw, "judge_parsed": judge,
-            "validation": validation, "gold_agreement": gold,
-            "evidence_references": {"ev_a": (judge or {}).get("ev_a"),
-                                    "ev_b": (judge or {}).get("ev_b")},
+            "raw_output_digest": digest_bytes(
+                raw_packets[fid]["raw_output"].encode()),
+            **result,
         }
-        # §F — citation accuracy + conclusion validity against FULL note
-        ev_checks = {}
-        if judge:
-            for side in ("ev_a", "ev_b"):
-                refs = judge.get(side) or []
-                source = rec["pair"][("A_text" if side == "ev_a" else "B_text")]
-                ev_checks[side + "_in_excerpt"] = [r in source for r in refs]
-        fx["citation_accuracy"] = ev_checks
-        if fid == "g7-1901-method" and judge:
-            # §F — claimed omissions verified against the FULL perturbed note
-            claimed = rec.get("judge_claimed_omissions") or []
-            basis = " ".join([json.dumps(judge)])
-            fx["omission_verification_vs_full_note"] = {
-                "claimed_omissions": claimed,
-                "note": "claimed omissions must be absent from the FULL "
-                        "perturbed note, not just the excerpt — verified in "
-                        "owner review below",
-                "full_perturbed_note_digest": digest_bytes(
-                    full_perturbed[fid].encode()),
-            }
 
     totals_tokens = sum(
         (p["usage"].get("prompt_tokens") or 0) + (p["usage"].get("completion_tokens") or 0)
