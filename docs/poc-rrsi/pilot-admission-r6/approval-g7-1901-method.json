@@ -1,0 +1,14 @@
+{
+ "schema": "rrsi-fixture-approval/v0.1",
+ "fixture_id": "g7-1901-method",
+ "fixture_digest": "e0ec0e4da80b38f6b2cd4eb8189b39861e2108cd870881c25973f7950c46cdd2",
+ "approved_scope": "Partial Required Information Coverage Loss",
+ "approved_by": "owner-directive (R5 admission — fixture-level scope fix)",
+ "approval_reference": "commit 9497c91 R5 results accepted by directive",
+ "independent_review_refs": [
+  "r5-adjudication review-records.jsonl (R4 Recommend Approval, scope-limited)",
+  "r4-revision review-records.jsonl (R1 verdicts)"
+ ],
+ "bundle_digest_context_only": true,
+ "approved_at": "2026-10-29T00:59:45Z"
+}

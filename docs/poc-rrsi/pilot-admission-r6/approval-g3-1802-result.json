@@ -1,0 +1,14 @@
+{
+ "schema": "rrsi-fixture-approval/v0.1",
+ "fixture_id": "g3-1802-result",
+ "fixture_digest": "48c5a0e48559d6678b1417fa35a4831607b049f2cf572a131f59fd99f04c8156",
+ "approved_scope": "Numeric Fidelity",
+ "approved_by": "owner-directive (R5 admission — fixture-level scope fix)",
+ "approval_reference": "commit 9497c91 R5 results accepted by directive",
+ "independent_review_refs": [
+  "r5-adjudication review-records.jsonl (R4 Recommend Approval, scope-limited)",
+  "r4-revision review-records.jsonl (R1 verdicts)"
+ ],
+ "bundle_digest_context_only": true,
+ "approved_at": "2026-10-29T00:59:45Z"
+}

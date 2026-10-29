@@ -1,0 +1,13 @@
+{
+ "artifact_digests": {
+  "admission-summary.json": "728e30bd70e6d0eb22cc64afcf127177a0deeaaad7bc5e6422a5313ef37e53f4",
+  "approval-g3-1802-result.json": "6e079accd768a9654f7c4b80275bd1f8b82690fb226e68138dd6731212244aee",
+  "approval-g4-1802-numeric.json": "6c123134fa5f9696dc8e31e5d8bf9fce464c0590769c2717e87c44387c65317f",
+  "approval-g7-1901-method.json": "8703c92aa23429dc203e663428784a2898a8028bed02f8cb83b00335dbd1a6fd",
+  "pair-g3-1802-result.json": "91fbe7bed13cea4edce3c9c81eb7b62398d9585ef4220e2f5bae8053c7a38c86",
+  "pair-g4-1802-numeric.json": "459310f232e043560ffcbe0ad926bd43a6e588987d292be8ba677b02389be4e9",
+  "pair-g7-1901-method.json": "b5b0173fbe13fd7d9bb3a9efde29b454e7d6d8dd98a80206a4db55d0dbf07898"
+ },
+ "run_dir": "poc/runs/perturbation-audit/r6-pilot-admission",
+ "schema": "rrsi-run-dir-seal/v0.1"
+}

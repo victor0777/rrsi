@@ -1,0 +1,9 @@
+{
+ "bundle_digest_context_only": "3ce9c206f4a83008cf5bd9994be64cc952981ea3ea74c16b5ffca073daf25523",
+ "approvals": 3,
+ "pairs": 3,
+ "all_prompts_blind": true,
+ "approved": 3,
+ "calls_executed": 0,
+ "tokens_used": 0
+}

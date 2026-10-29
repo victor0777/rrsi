@@ -1,0 +1,24 @@
+{
+ "schema": "rrsi-semantic-judge-pilot/v0.1",
+ "fixture_id": "g3-1802-result",
+ "fixture_digest": "48c5a0e48559d6678b1417fa35a4831607b049f2cf572a131f59fd99f04c8156",
+ "perturbed_path": "poc/runs/perturbation-audit/r1/p2-1802-vocab.md",
+ "perturbed_digest": "cac6ae09c5d83aff8664079dc9a4fcd6fd02d07f67bc08ca72df8f6cb2400531",
+ "original_digest": "99efc53f0df17bc50f4a53f0f0cf5cea63a00e6f71b2cae2b7100a61b02d9bfa",
+ "prompt_blind": true,
+ "unblind_map_sealed": {
+  "A": "original",
+  "B": "perturbed"
+ },
+ "system_prompt": "You are an independent evaluation judge. You will receive two paper reading notes labeled A and B, and one evaluation dimension. Assess each note on that dimension ONLY, from the text itself. Do not assume either note is the original. Return strict JSON with: per-input quality verdict, the basis grounded in the text, evidence references, a relative quality judgment of A vs B, and — if the dimension cannot be judged from the provided text — an abstention with the reason.",
+ "user_prompt_sha256": "0b3d18251d2cba415f3c8e53d81e87611d29628aef3e71330f017859b9ad81b7",
+ "limits": {
+  "max_eval_calls": 3,
+  "max_total_tokens": 6000,
+  "max_wall_seconds": 300,
+  "retry": 0,
+  "endpoint": "http://127.0.0.1:8004/v1",
+  "model": "qwen38-27b-fp8-vllm-tp1-ktl02"
+ },
+ "g7_special_check": false
+}
