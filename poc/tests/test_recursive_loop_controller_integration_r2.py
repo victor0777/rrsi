@@ -486,6 +486,123 @@ def test_gate_d_resume_no_duplicate_evaluation():
     assert fresh.job_id == snap["current_evaluation_id"]
 
 
+# ---------------- R2.1 — resume atomicity & cumulative settlement ------------
+def test_r21_resume_atomic_on_identity_failure():
+    """A FAILED resume leaves the controller state COMPLETELY unchanged
+    (verification on local copies, single commit at the end)."""
+    loop, client = make_loop()
+    advance_to_feedback(loop, client, token_cost=300)
+    loop.complete_evaluation()
+    snap = loop.seal_snapshot(loop.snapshot())
+    fresh = RecursiveLoopControllerR2()
+    fresh.state = "BASELINE_BOUND"
+    fresh.baseline = {"baseline_id": "prior", "version": "v0"}
+    fresh.baseline_metrics = {"answer_quality": 0.1}
+    fresh.baseline_wire = "0" * 64
+    fresh.candidate = {"candidate_id": "prior"}
+    fresh.job_id = "prior-job"
+    fresh.iteration = 42
+    fresh.evaluations = 9
+    fresh.tokens_spent = 123
+    fresh.history = [{"prior": True}]
+    fresh.evaluation_history = [{"evaluation_id": "prior-job"}]
+
+    class Double(MockClientAdapter):
+        def get_evaluation_status(self, evaluation_id):
+            return "CANCELLED"    # workbench state mismatch mid-restore
+
+    with pytest.raises(ContractRejected) as ei:
+        fresh.resume(snap, client=Double(client._mock))
+    assert "WORKBENCH_EVALUATION_STATE_MISMATCH" in str(ei.value)
+    # NOTHING changed — failed resume is a no-op
+    assert fresh.state == "BASELINE_BOUND"
+    assert fresh.baseline == {"baseline_id": "prior", "version": "v0"}
+    assert fresh.candidate == {"candidate_id": "prior"}
+    assert fresh.job_id == "prior-job"
+    assert fresh.iteration == 42 and fresh.evaluations == 9
+    assert fresh.tokens_spent == 123
+    assert fresh.history == [{"prior": True}]
+
+
+def test_r21_multi_evaluation_resume_cumulative_ledger():
+    """After 3 completed evaluations, resume compares the CUMULATIVE
+    ledger against the SUM of per-evaluation usage — never against a
+    single evaluation's usage (SNAPSHOT_BUDGET_EXCEEDS false alarm gone)."""
+    loop, client = make_loop()
+    total = 0
+    for i, (cid, desc, cost) in enumerate((("cand-1-a", "x", 300),
+                                           ("cand-2-b", "y", 250),
+                                           ("cand-3-c", "z", 350))):
+        generate(loop, cid=cid, desc=desc,
+                 tokens=1000 + i * 1000)
+        loop.validate_candidate_step()
+        loop.request_evaluation()
+        loop.poll_evaluation()
+        client.deliver_result(loop.job_id, dict(BASELINE, answer_quality=0.65),
+                              token_cost=cost)
+        loop.complete_evaluation()
+        total += cost
+        if i < 2:
+            generate(loop, cid=f"cand-{i + 4}-d", desc="n" + "x" * i,
+                     tokens=1)
+            loop.validate_candidate_step()
+            loop.request_evaluation()
+    assert loop.tokens_spent == total
+    snap = loop.seal_snapshot(loop.snapshot())
+    fresh = RecursiveLoopControllerR2()
+    out = fresh.resume(snap, client=client)   # no false exceed alarm
+    assert out["resumed"] is True
+    assert fresh.tokens_spent == total        # cumulative preserved
+    # workbench usage ABOVE the snapshot is adopted (authoritative)
+    double = make_double(client, get_evaluation_usage=lambda self, _eid: {
+        "tokens_used": 400, "model_calls_used": 2,
+        "settlement_basis": "actual_usage"})
+    fresh2 = RecursiveLoopControllerR2()
+    fresh2.resume(snap, client=double)
+    # history holds 5 evaluations (3 completed + 2 pending) → 5 × 400
+    assert fresh2.tokens_spent == 2000        # workbench wins
+    # workbench usage BELOW the snapshot (cumulative) is REJECTED
+    low = make_double(client, get_evaluation_usage=lambda self, _eid: {
+        "tokens_used": 10, "model_calls_used": 0,
+        "settlement_basis": "actual_usage"})
+    with pytest.raises(ContractRejected) as ei:
+        fresh2.resume(snap, client=low)
+    assert "SNAPSHOT_BUDGET_EXCEEDS_WORKBENCH" in str(ei.value)
+
+
+def test_r21_loopback_adapter_uses_official_surfaces_only():
+    """The loopback adapter NEVER touches workbench internals in its own
+    source — official transport surfaces only (Gate A strengthening)."""
+    src = inspect.getsource(LoopbackClientAdapter)
+    for pattern in (r"self\._service\.records", r"\.records\[",
+                    r"self\._service\.\w*(budget|jobs)"):
+        assert not re.search(pattern, src), pattern
+    # behavioral check: usage comes from official surfaces (result + settle)
+    loop, client, _ = make_loopback_loop(
+        baseline_metrics=dict(BASELINE, answer_quality=0.40,
+                              token_cost=1200),
+        evaluator=loopback_evaluator(answer_f1=0.42))
+    run_loopback(loop, client)
+    usage = client.get_evaluation_usage(loop.job_id)
+    assert usage["settlement_basis"] == "actual_usage"
+    assert usage["tokens_used"] > 0 and usage["model_calls_used"] > 0
+
+
+def test_r21_promotion_reverifies_decision_record_digest():
+    """A tampered Decision Record blocks promotion (digest re-verified at
+    promotion time, not only at creation)."""
+    loop, client = make_loop()
+    advance_to_feedback(loop, client, token_cost=300)
+    loop.complete_evaluation()
+    loop.assess_feedback_step()
+    # tamper the LAST record in the append-only list
+    loop.decision_records[-1]["decision"] = "REJECT"
+    r = loop.propose_promotion(rollback_plan="rb", residual_risks="rr")
+    assert r["promotion_blocked"] is True
+    assert "reward_cost_risk_pass" in r["failing_preconditions"]
+    assert "decision_record_integrity" in r["failing_preconditions"]
+
+
 # ============ Gate E — cross-repo controller E2E (real service) ==============
 def make_loopback_loop(*, baseline_metrics, evaluator):
     service = EvaluationService({}, evaluator=evaluator)
@@ -499,6 +616,7 @@ def make_loopback_loop(*, baseline_metrics, evaluator):
 
 def loopback_evaluator(answer_f1=0.42, tokens=1200, samples=70):
     def evaluator(request, budget, events):
+        budget.model_calls_used += 1   # actual usage basis (like default)
         return {"status": "COMPLETED_VALID", "failure_category": "none",
                 "quality_metrics": {"answer_f1": answer_f1},
                 "evidence_metrics": {"evidence_f1": 0.72},

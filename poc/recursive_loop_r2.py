@@ -277,10 +277,12 @@ class LoopbackClientAdapter(WorkbenchClientInterface):
             "POST", f"/v1/evaluations/{evaluation_id}/cancel")["body"]
 
     def get_evaluation_usage(self, evaluation_id: str) -> dict:
+        """Trusted usage — OFFICIAL surfaces only: settle-budget response +
+        token usage from the provenance-verified canonical result."""
         settle = self._request(
             "POST", f"/v1/evaluations/{evaluation_id}/settle-budget")["body"]
-        tokens = ((self._service.records[evaluation_id].result or {})
-                  .get("cost_metrics") or {}).get("tokens", 0)
+        tokens = ((self.get_evaluation_result(evaluation_id)
+                   .get("cost_metrics") or {}).get("tokens", 0))
         return {"tokens_used": tokens,
                 "model_calls_used": settle["model_calls_used"],
                 "settlement_basis": settle["settlement_basis"]}
@@ -372,7 +374,25 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
             return self._fail_closed("SCHEMA_INVALID")
         if res.get("evaluation_id") != self.job_id:       # 3 evaluation id
             return self._fail_closed("EVALUATION_IDENTITY_MISMATCH")
-        if res.get("status") not in (                     # 8 status first
+        # 4-7: identity / profile / policy / provenance — EXPLICIT ordered
+        # checks so the executed order equals the documented 12-step order
+        ci = res.get("candidate_identity") or {}
+        if ci.get("candidate_id") != self.candidate["candidate_id"] or \
+                ci.get("candidate_digest") != DigestAdapter.to_wire(
+                    self.candidate["candidate_digest"]):      # 4 candidate
+            return self._fail_closed("CANDIDATE_IDENTITY_MISMATCH")
+        if (res.get("baseline_identity") or {}).get("baseline_digest") != \
+                self.baseline_wire:                           # 5 baseline
+            return self._fail_closed("BASELINE_IDENTITY_MISMATCH")
+        if res.get("policy_version") != WORKBENCH_POLICY_VERSION:
+            return self._fail_closed("POLICY_VERSION_MISMATCH")   # 6 policy
+        claimed = res.get("provenance_digest") or ""
+        covered = {k: v for k, v in res.items()
+                   if k != "provenance_digest"}
+        if claimed != hashlib.sha256(
+                canonical_payload_bytes(covered)).hexdigest():    # 7 provenance
+            return self._fail_closed("PROVENANCE_VERIFICATION_FAILED")
+        if res["status"] not in (                         # 8 status (AFTER 4-7)
                 "COMPLETED_VALID", "COMPLETED_INVALID",
                 "INSUFFICIENT_EVIDENCE", "FAILED", "CANCELLED",
                 "BUDGET_EXHAUSTED"):
@@ -386,15 +406,25 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
                                       "BUDGET_EXHAUSTED":
                                           "BUDGET_EXHAUSTED"}.get(
                                           res["status"], "EVALUATION_INVALID"))
-        try:  # 4-7 identities + 9 required metrics via the 10-condition check
-            metrics = self._validate_result_payload(res)
-        except ContractRejected as exc:
-            return self._fail_closed(
-                "RESULT_REJECTED:" + str(exc).split(";")[0].split(":")[0])
+        metrics = (res.get("quality_metrics") or {})      # 9 required metrics
+        if metrics.get("answer_f1") is None:
+            return self._fail_closed("REQUIRED_METRICS_MISSING")
+        boundary = (res.get("benchmark_cohort") or {}).get("data_boundary")
+        if boundary not in ("development", "validation", "held_out"):
+            return self._fail_closed("DATA_BOUNDARY_UNKNOWN")
         tokens = (res.get("cost_metrics") or {}).get("tokens", 0)  # 10 usage
         if not self.validated_result:                     # settle ONCE
             self.tokens_spent += tokens
-        # 11 mapping already produced by _validate_result_payload
+        # 11 reward/cost/risk axis mapping (10-condition validator re-run;
+        # guaranteed to pass — every condition already held above)
+        try:
+            mapped = from_workbench_result_r2(
+                res, candidate=self.candidate,
+                baseline_wire=self.baseline_wire,
+                approved_budget_tokens=self.approved_budget_tokens or None)
+        except ContractRejected as exc:
+            return self._fail_closed(
+                "RESULT_REJECTED:" + str(exc).split(";")[0].split(":")[0])
         self.validated_result = {                         # immutable record
             "evaluation_id": res["evaluation_id"],
             "candidate_digest": self.candidate["candidate_digest"],
@@ -406,7 +436,7 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
                 res.get("improvement_claim_allowed")),
             "sample_count": res.get("sample_count", 0),
             "tokens_used": tokens,
-            "metrics": metrics}
+            "metrics": mapped}
         self.state = "EVALUATION_COMPLETED"               # 12 transition
         return {"state": self.state, "result": self.validated_result,
                 "duplicate_receive": False}
@@ -427,6 +457,13 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
         vr = self.validated_result
         last_decision = self.decision_records[-1] if \
             self.decision_records else None
+        # Decision Record integrity is RE-VERIFIED at promotion time — the
+        # digest makes tampering DETECTABLE here (append-only list + digest
+        # discipline; it is not an immutable object per se)
+        decision_tampered = bool(last_decision) and \
+            last_decision.get("decision_record_digest") != "sha256:" + \
+            _canonical_digest({k: v for k, v in last_decision.items()
+                               if k != "decision_record_digest"})
         preconditions = {
             "candidate_validation_pass":
                 self.state in ("NEXT_ITERATION", "CANDIDATE_VALIDATED"),
@@ -438,9 +475,12 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
                               self.candidate["target_version"] ==
                               self.baseline["version"],
             "reward_cost_risk_pass": bool(last_decision) and
+                                     not decision_tampered and
                                      last_decision["decision"] == "ADVANCE"
                                      and last_decision["evaluation_id"] ==
                                      self.job_id,
+            "decision_record_integrity": bool(last_decision) and
+                                         not decision_tampered,
             "evidence_present": bool(self.decision_records),
             "approved_profile": bool(vr) and vr["evaluation_profile"] in
                                 APPROVED_EVALUATION_PROFILES,
@@ -543,12 +583,16 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
                                           else None),
             "snapshot_digest": None}
 
-    # -- D: durable resume — 10-step restoration with workbench truth --
+    # -- D: durable resume — ATOMIC 10-step restoration --
     def resume(self, snap: dict, *, client: WorkbenchClientInterface) -> dict:
         """1 schema version -> 2 digest -> 3 baseline -> 4 candidate -> 5
         evaluation id -> 6 workbench status re-query -> 7 workbench result
-        identity re-verify -> 8 usage query -> 9 budget ledger comparison
-        (workbench usage AUTHORITATIVE) -> 10 safe restore."""
+        identity re-verify -> 8 usage query (per evaluation, SUMMED) -> 9
+        budget ledger comparison (workbench usage AUTHORITATIVE) -> 10
+        commit. ALL verification runs on LOCAL state first; ANY failure
+        leaves the controller UNCHANGED (atomic restore). The snapshot
+        digest is integrity-only — persistent trust additionally requires
+        a trusted/sealed snapshot store (separate premise)."""
         problems = []
         if not isinstance(snap, dict):                    # 1 version
             raise ContractRejected("SNAPSHOT_NOT_OBJECT")
@@ -571,6 +615,35 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
             problems.append("SNAPSHOT_TAMPERED")
         if problems:
             raise ContractRejected(";".join(problems))
+        # ---- verification on LOCAL copies (nothing committed yet) ----
+        local_tokens = snap["budget_ledger"]["tokens_spent"]
+        if snap.get("current_evaluation_id"):
+            evaluation_id = snap["current_evaluation_id"]
+            status = client.get_evaluation_status(evaluation_id)  # 6 status
+            if status != "COMPLETED":
+                raise ContractRejected("WORKBENCH_EVALUATION_STATE_MISMATCH:"
+                                       + status)
+            try:                                          # 7 identity re-verify
+                res = client.get_evaluation_result(evaluation_id)
+                from_workbench_result_r2(
+                    res, candidate=snap.get("current_candidate") or {},
+                    baseline_wire=snap["baseline_wire"])
+            except (ClientError, ContractRejected) as exc:
+                raise ContractRejected(
+                    "WORKBENCH_RESULT_IDENTITY_MISMATCH:" + str(exc))
+            # 8+9 usage: SUM the trusted per-evaluation usage over the FULL
+            # evaluation history — never compare cumulative ledger against
+            # a single evaluation's usage
+            wb_total = 0
+            for entry in snap["evaluation_history"]:
+                wb_total += client.get_evaluation_usage(
+                    entry["evaluation_id"]).get("tokens_used", 0)
+            if local_tokens > wb_total:
+                raise ContractRejected(
+                    "SNAPSHOT_BUDGET_EXCEEDS_WORKBENCH")
+            if wb_total > local_tokens:
+                local_tokens = wb_total  # workbench usage authoritative
+        # ---- 10 commit: single atomic assignment block ----
         self.client = client
         self.baseline = dict(snap["baseline_identity"])
         self.baseline_metrics = dict(snap["baseline_metrics"])
@@ -580,34 +653,14 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
         self.job_id = snap.get("current_evaluation_id")
         self.iteration = snap["iteration"]
         self.evaluations = snap["evaluations"]
-        self.tokens_spent = snap["budget_ledger"]["tokens_spent"]
+        self.tokens_spent = local_tokens
         self.approved_budget_tokens = snap["budget_ledger"].get(
             "approved_budget", 0)
         self.history = list(snap["candidate_history"])
         self.evaluation_history = list(snap["evaluation_history"])
         self.best_quality = snap.get("best_candidate_quality")
         self.stop_reason = snap.get("stop_reason")
-        if self.job_id:                                   # 6 status re-query
-            status = client.get_evaluation_status(self.job_id)
-            if status != "COMPLETED":
-                raise ContractRejected("WORKBENCH_EVALUATION_STATE_MISMATCH:"
-                                       + status)
-            try:                                          # 7 identity re-verify
-                res = client.get_evaluation_result(self.job_id)
-                from_workbench_result_r2(
-                    res, candidate=self.candidate,
-                    baseline_wire=self.baseline_wire)
-            except (ClientError, ContractRejected) as exc:
-                raise ContractRejected(
-                    "WORKBENCH_RESULT_IDENTITY_MISMATCH:" + str(exc))
-            usage = client.get_evaluation_usage(self.job_id)   # 8 usage
-            wb_tokens = usage.get("tokens_used", 0)            # 9 ledger
-            if self.tokens_spent > wb_tokens:
-                raise ContractRejected(
-                    "SNAPSHOT_BUDGET_EXCEEDS_WORKBENCH")
-            if wb_tokens > self.tokens_spent:
-                self.tokens_spent = wb_tokens   # workbench usage authoritative
-        return {"resumed": True, "state": self.state}          # 10 restore
+        return {"resumed": True, "state": self.state}
 
     def cancel(self, reason: str = "EXPLICIT_CANCELLATION") -> dict:
         self._terminate(reason)

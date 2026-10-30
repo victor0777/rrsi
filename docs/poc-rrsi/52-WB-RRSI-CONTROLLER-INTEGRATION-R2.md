@@ -147,3 +147,60 @@ service 기록에 대한 negative test로만 수행.
 단, 이는 결정적 mock·loopback 경로에서 Controller↔EvaluationService
 닫힌 루프의 계약·무결성이 검증된 것일 뿐, 실제 Researcher 성능 개선이나
 운영 승격이 완료됐다는 의미가 아니다.
+
+---
+
+## R2.1 — Controller Integrity & Resume Atomicity (검토 의견 보완)
+
+독립 검토에서 발견된 결함 4종을 수정 (새 기능 추가 없음):
+
+### P0-1 — Loopback 사용량 조회 공식 경계 위반 → 수정
+
+`LoopbackClientAdapter.get_evaluation_usage()`이
+`self._service.records[...]` 내부 접근 → 제거. 이제 settle-budget
+응답 + **provenance 검증을 통과한 공식 결과 표면**
+(`get_evaluation_result`)에서만 사용량 취득. 어댑터 자체 소스에 대한
+정적 스캔 테스트 추가 (`self._service.records` / `records[` / budget·jobs
+접근 0건) + 행위 검증(공식 표면 기반 usage).
+
+### P0-2 — Resume 비원자적 복원 → 원자적 복원
+
+기존: Snapshot 검증 직후 controller 상태를 먼저 수정하고 그다음
+Workbench 재검증 → 검증 실패 시 변경된 상태 잔존.
+수정: **모든 검증을 지역 사본에서 수행** — 6 상태 재조회 → 7 결과
+identity 재검증 → 8+9 사용량 조회·대조 전부 완료된 뒤, 최종 단일
+commit 블록에서 한 번에 복원. 실패한 resume은 controller 상태를
+전혀 변경하지 않음 (테스트: identity 실패 후 prior 상태 8필드 전부
+불변 확인).
+
+### P1 — 누적 사용량 vs 단일 평가 사용량 혼동 → 수정
+
+기존 `resume()`은 누적 `tokens_spent`와 마지막 평가 1건의 사용량을
+직접 비교 → 다중 평가 후 resume에서
+`SNAPSHOT_BUDGET_EXCEEDS_WORKBENCH` 오탐. 수정: **evaluation_history
+전체에 대한 평가별 신뢰된 사용량 합산**과 대조. 테스트: 3건 완료
+(누적 900) 후 resume → 오탐 없음, 누적 보존; workbench 합산 초과 시
+채택(2000), 미달 시 거부.
+
+### 검토 사항 정리 (Gate B/C/D)
+
+- **Gate B 단계 순서**: status 검사를 provenance 검증(7) 이후로
+  재배치 — 실행 순서가 문서 고정 12단계와 동일해짐 (명시적 순서 검사
+  4→5→6→7→8→9).
+- **Gate C Decision Record**: `decision_records`는 append-only
+  list[dict]로 "불변 객체"가 아니라는 지적 반영 — 문서 표현 수정 +
+  promotion 시점에 **digest 재검증** 추가 (변조 탐지가 promotion
+  경계에서 작동; `decision_record_integrity` 사전조건 신설).
+- **Gate D Snapshot digest**: 무결성 전용이며 변조 방지 증거가
+  아니라는 점을 docstring에 명시 — 영속 신뢰는 신뢰된(봉인된)
+  snapshot 저장소가 별도 전제. `snapshot()`은 digest 없는 상태로
+  반환하고 `seal_snapshot()`으로 봉인하는 계약 명시.
+
+### R2.1 회귀
+
+- RRSI: **256/256 PASS** (R2.1 신규 4: resume 원자성 · 다중 평가
+  누적 정산 · 어댑터 공식 표면 스캔+행위 · Decision Record 재검증)
+- Workbench: **114/114 PASS** (변경 0)
+- 동일 6개 E2E 시나리오 + 다중 평가 resume 시나리오 재실행 PASS.
+
+**R2.1 최종 상태: `CONTROLLER_CLOSED_LOOP_VERIFIED`** (강화 근거)
