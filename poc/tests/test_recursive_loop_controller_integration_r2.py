@@ -615,12 +615,10 @@ def test_r22_resume_reconnects_in_progress_evaluation():
     loop.request_evaluation()
     snap = loop.seal_snapshot(loop.snapshot())
 
-    class RunningDouble(MockClientAdapter):
-        def get_evaluation_status(self, evaluation_id):
-            return "RUNNING"
-
+    running = make_double(client, get_evaluation_status=lambda self, _eid:
+                          "RUNNING")
     fresh = RecursiveLoopControllerR2()
-    out = fresh.resume(snap, client=RunningDouble(client._mock))
+    out = fresh.resume(snap, client=running)
     assert out["state"] == "EVALUATION_REQUESTED"
     assert fresh.job_id == snap["current_evaluation_id"]
     # reconnect to the REAL adapter, then polling + consumption complete
@@ -660,6 +658,133 @@ def test_r22_promotion_requires_candidate_digest_binding():
     r = loop.propose_promotion(rollback_plan="rb", residual_risks="rr")
     assert r["promotion_blocked"] is True
     assert "reward_cost_risk_pass" in r["failing_preconditions"]
+
+
+# ---------------- R2.3 — settlement order, running identity, cumulative ------
+def test_r23_no_settlement_side_effect_on_unverified_result():
+    """Provenance verification happens BEFORE settle-budget: an unverified
+    result produces ZERO workbench settlement side effects."""
+    loop, client, service = make_loopback_loop(
+        baseline_metrics=dict(BASELINE, answer_quality=0.40,
+                              token_cost=1200),
+        evaluator=loopback_evaluator(answer_f1=0.42))
+    run_loopback(loop, client)
+    record = service.records[loop.job_id]
+    usage_before = record.model_calls_used
+    budget_before = service.budget.model_calls_used
+    record.result = dict(record.result, quality_metrics={"answer_f1": 0.99})
+    with pytest.raises(ClientError) as ei:
+        client.get_evaluation_usage(loop.job_id)
+    assert "PROVENANCE_VERIFICATION_FAILED" in str(ei.value)
+    # zero side effects — the settlement API was never reached
+    assert record.model_calls_used == usage_before
+    assert service.budget.model_calls_used == budget_before
+
+
+def test_r23_running_resume_identity_mismatch_rejected():
+    """A RUNNING workbench evaluation bound to a DIFFERENT candidate can
+    never be reconnected (official identity surface check)."""
+    loop, client = make_loop()
+    generate(loop)
+    loop.validate_candidate_step()
+    loop.request_evaluation()
+    snap = loop.seal_snapshot(loop.snapshot())
+    running = make_double(client, get_evaluation_status=lambda self, _eid:
+                          "RUNNING",
+                          get_evaluation_identity=lambda self, _eid: {
+                              "evaluation_id": _eid,
+                              "candidate_id": "cand-OTHER",
+                              "policy_version": "candidate-evaluation-policy"
+                                                "/v0.1"})
+    with pytest.raises(ContractRejected) as ei:
+        RecursiveLoopControllerR2().resume(snap, client=running)
+    assert "RUNNING_IDENTITY_MISMATCH" in str(ei.value)
+    # identity UNAVAILABLE is also fail-closed
+    no_identity = make_double(client, get_evaluation_status=lambda self,
+                              _eid: "RUNNING",
+                              get_evaluation_identity=lambda self, _eid:
+                              (_ for _ in ()).throw(
+                                  ClientError("EVALUATION_NOT_FOUND")))
+    with pytest.raises(ContractRejected) as ei2:
+        RecursiveLoopControllerR2().resume(snap, client=no_identity)
+    assert "RUNNING_IDENTITY_UNVERIFIED" in str(ei2.value)
+
+
+def test_r23_resume_reconnect_duplicate_submit_prevented():
+    """After reconnect, a resubmission of the SAME candidate is idempotent
+    (same evaluation id, no count increment)."""
+    loop, client = make_loop()
+    generate(loop)
+    loop.validate_candidate_step()
+    loop.request_evaluation()
+    snap = loop.seal_snapshot(loop.snapshot())
+    running = make_double(client, get_evaluation_status=lambda self, _eid:
+                          "RUNNING")
+    fresh = RecursiveLoopControllerR2()
+    fresh.resume(snap, client=running)
+    fresh.client = client
+    evaluations = fresh.evaluations
+    out = fresh.request_evaluation()
+    assert out["duplicate"] is True
+    assert fresh.evaluations == evaluations
+    assert fresh.job_id == snap["current_evaluation_id"]
+
+
+def test_r23_reconnect_then_workbench_fails():
+    """Reconnect followed by a FAILED workbench transition is fail-closed:
+    polling completes and consumption lands in TERMINATED."""
+    loop, client = make_loop()
+    generate(loop)
+    loop.validate_candidate_step()
+    loop.request_evaluation()
+    snap = loop.seal_snapshot(loop.snapshot())
+    running = make_double(client, get_evaluation_status=lambda self, _eid:
+                          "RUNNING")
+    fresh = RecursiveLoopControllerR2()
+    fresh.resume(snap, client=running)
+    fresh.client = client
+    client.deliver_result(fresh.job_id, dict(BASELINE, answer_quality=0.65),
+                          valid=False)
+    assert fresh.poll_evaluation() == "COMPLETED"
+    out = fresh.complete_evaluation()
+    assert out["state"] == "TERMINATED"
+    assert out["reason"] == "EVALUATION_INVALID"
+
+
+def test_r23_cumulative_budget_cap_separate_from_per_evaluation():
+    """Cumulative budget enforcement is separate: a result within the
+    per-evaluation cap but pushing TOTAL usage over the approved budget
+    is blocked (700 prior + 500 current > 1000 approved)."""
+    loop, client = make_loop(budget_eval_tokens=1000)
+    generate(loop, cid="cand-1-a", desc="x", tokens=500)
+    loop.validate_candidate_step()
+    loop.request_evaluation()
+    loop.poll_evaluation()
+    client.deliver_result(loop.job_id, dict(BASELINE, answer_quality=0.65),
+                          token_cost=700)
+    loop.complete_evaluation()
+    assert loop.tokens_spent == 700
+    # second candidate: 500 usage — within the per-evaluation cap
+    generate(loop, cid="cand-2-b", desc="y", tokens=500)
+    loop.validate_candidate_step()
+    loop.request_evaluation()          # _check_budget passes: 700 < 1000
+    loop.poll_evaluation()
+    client.deliver_result(loop.job_id, dict(BASELINE, answer_quality=0.65),
+                          token_cost=500)
+    sealed = client.get_evaluation_result(loop.job_id)
+
+    class UsageDouble(MockClientAdapter):
+        def get_evaluation_result(self, evaluation_id):
+            # force 500 verified usage (mock caps it below; cap semantics
+            # under test are the CONTROLLER's cumulative envelope)
+            cost = dict(sealed["cost_metrics"], tokens=500)
+            return _normalized_result(dict(sealed, cost_metrics=cost))
+
+    loop.client = UsageDouble(client._mock)
+    out = loop.complete_evaluation()
+    assert out["state"] == "TERMINATED"
+    assert out["reason"] == "CUMULATIVE_BUDGET_EXCEEDED"
+    assert loop.tokens_spent == 700    # unverified usage never settled
 
 
 def test_r21_loopback_adapter_uses_official_surfaces_only():

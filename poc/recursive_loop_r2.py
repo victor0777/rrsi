@@ -92,6 +92,11 @@ class WorkbenchClientInterface:
         """TRUSTED Workbench usage (authoritative over local ledger)."""
         raise NotImplementedError
 
+    def get_evaluation_identity(self, evaluation_id: str) -> dict:
+        """Official evaluation identity surface (candidate binding check):
+        {"evaluation_id", "candidate_id", "policy_version"}."""
+        raise NotImplementedError
+
 
 def _canonical_digest(payload: dict) -> str:
     return hashlib.sha256(canonical_payload_bytes(payload)).hexdigest()
@@ -213,6 +218,16 @@ class MockClientAdapter(WorkbenchClientInterface):
     def get_evaluation_events(self, evaluation_id: str) -> list:
         return [{"kind": "evaluation_finished"}]
 
+    def get_evaluation_identity(self, evaluation_id: str) -> dict:
+        ident = self._identity.get(evaluation_id)
+        if ident is None:
+            raise ClientError("EVALUATION_NOT_FOUND", evaluation_id)
+        return {"evaluation_id": evaluation_id,
+                "candidate_id": ident["candidate_id"],
+                "candidate_digest": DigestAdapter.to_wire(
+                    ident["candidate_digest"]),
+                "policy_version": ident["policy_version"]}
+
     def cancel_evaluation(self, evaluation_id: str) -> dict:
         try:
             self._mock.cancel(evaluation_id)
@@ -285,21 +300,42 @@ class LoopbackClientAdapter(WorkbenchClientInterface):
         return self._request(
             "GET", f"/v1/evaluations/{evaluation_id}/events")["body"]["events"]
 
+    def get_evaluation_identity(self, evaluation_id: str) -> dict:
+        body = self._request(
+            "GET", f"/v1/evaluations/{evaluation_id}")["body"]
+        return {"evaluation_id": body["evaluation_id"],
+                "candidate_id": body["candidate_id"],
+                "policy_version": body["policy_version"]}
+
     def cancel_evaluation(self, evaluation_id: str) -> dict:
         return self._request(
             "POST", f"/v1/evaluations/{evaluation_id}/cancel")["body"]
 
     def get_evaluation_usage(self, evaluation_id: str) -> dict:
-        """Trusted usage — OFFICIAL surfaces only: settle-budget response +
-        token usage from the canonical result, whose provenance is
-        VERIFIED HERE (fail-closed: unverified results are never a
-        settlement basis)."""
-        settle = self._request(
-            "POST", f"/v1/evaluations/{evaluation_id}/settle-budget")["body"]
+        """Trusted usage — OFFICIAL surfaces only, VERIFY-FIRST order:
+        1 canonical result via the official result surface -> 2 provenance
+        + evaluation identity verified HERE -> 3 usage read from the
+        verified result -> 4 settle-budget called LAST -> 5 settlement
+        response cross-checked (evaluation id, usage basis, non-negative
+        usage). Fail-closed: an unverified result NEVER reaches
+        settle-budget."""
         result = self.get_evaluation_result(evaluation_id)
         if not _verify_provenance(result):
             raise ClientError("PROVENANCE_VERIFICATION_FAILED", evaluation_id)
+        if result.get("evaluation_id") != evaluation_id:
+            raise ClientError("EVALUATION_IDENTITY_MISMATCH", evaluation_id)
         tokens = (result.get("cost_metrics") or {}).get("tokens", 0)
+        if tokens is None or tokens < 0:
+            raise ClientError("BUDGET_ACCOUNTING_UNKNOWN", evaluation_id)
+        settle = self._request(
+            "POST", f"/v1/evaluations/{evaluation_id}/settle-budget")["body"]
+        if settle.get("evaluation_id") != evaluation_id:
+            raise ClientError("SETTLEMENT_IDENTITY_MISMATCH", evaluation_id)
+        if settle.get("settlement_basis") != "actual_usage":
+            raise ClientError("SETTLEMENT_BASIS_UNEXPECTED", evaluation_id)
+        if not isinstance(settle.get("model_calls_used"), int) or \
+                settle["model_calls_used"] < 0:
+            raise ClientError("SETTLEMENT_USAGE_INVALID", evaluation_id)
         return {"tokens_used": tokens,
                 "model_calls_used": settle["model_calls_used"],
                 "settlement_basis": settle["settlement_basis"]}
@@ -430,11 +466,16 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
         if boundary not in ("development", "validation", "held_out"):
             return self._fail_closed("DATA_BOUNDARY_UNKNOWN")
         tokens = (res.get("cost_metrics") or {}).get("tokens", 0)  # 10 usage
-        # budget cap is verified BEFORE any ledger change — an overage
+        # budget caps are verified BEFORE any ledger change — an overage
         # result never charges the controller (the workbench ledger holds
-        # the authoritative usage)
+        # the authoritative usage):
+        #   a) PER-EVALUATION cap: a single evaluation above the approved cap
+        #   b) CUMULATIVE cap: total verified usage above the approved budget
         if self.approved_budget_tokens and tokens > self.approved_budget_tokens:
             return self._fail_closed("BUDGET_CAP_EXCEEDED")
+        if self.approved_budget_tokens and \
+                self.tokens_spent + tokens > self.approved_budget_tokens:
+            return self._fail_closed("CUMULATIVE_BUDGET_EXCEEDED")
         # 11 reward/cost/risk axis mapping (10-condition validator re-run;
         # guaranteed to pass — every condition already held above)
         try:
@@ -651,7 +692,22 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
             if status == "RUNNING":
                 # in-progress evaluation RECONNECT: the evaluation id is
                 # preserved, no result exists yet — resume into
-                # EVALUATION_REQUESTED so polling/consumption can continue
+                # EVALUATION_REQUESTED so polling/consumption can continue.
+                # The RUNNING work must be bound to the SNAPSHOT's candidate
+                # via the OFFICIAL identity surface; an identity that does
+                # not match (or is unavailable) is fail-closed
+                try:
+                    identity = client.get_evaluation_identity(evaluation_id)
+                except ClientError:
+                    raise ContractRejected(
+                        "RUNNING_IDENTITY_UNVERIFIED:" + evaluation_id)
+                snap_candidate = snap.get("current_candidate") or {}
+                if identity.get("candidate_id") != \
+                        snap_candidate.get("candidate_id") or \
+                        identity.get("policy_version") != \
+                        WORKBENCH_POLICY_VERSION:
+                    raise ContractRejected(
+                        "RUNNING_IDENTITY_MISMATCH:" + evaluation_id)
                 restore = {"state": "EVALUATION_REQUESTED", "stop_reason":
                            None}
             elif status == "CANCELLED":

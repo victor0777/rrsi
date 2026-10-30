@@ -261,3 +261,71 @@ candidate 교체·상태 오용 상태에서 promotion 차단. 테스트: digest
 
 다음 단계(검토 권고 반영): Mock 통합 반복 종료 — Researcher Task
 REST API와 연결하는 실제 평가 단계로 진행 (Owner 승인 필요).
+
+---
+
+## R2.3 — Settlement & Running Identity Closure (검토 의견 보완)
+
+R2.2 검토(조건부 수용)의 보류 항목 3종 수정 —
+`WB-RRSI-CONTROLLER-R2.3 — Settlement & Running Identity Closure`:
+
+### P0 — 정산 부작용 순서 → VERIFY-FIRST 정산
+
+`LoopbackClientAdapter.get_evaluation_usage()`이 settle-budget을
+**먼저** 호출하고 provenance를 검증 → 검증 실패 결과에도 정산 API
+호출이 선행하는 위험. 수정 — 고정 순서:
+
+```
+1 공식 결과 표면으로 Canonical Result 조회
+2 provenance + evaluation identity 검증 (실패 → 즉시 ClientError,
+  settle-budget 미도달)
+3 검증된 결과에서 사용량 확인 (None/음수 → BUDGET_ACCOUNTING_UNKNOWN)
+4 settle-budget 호출 (마지막)
+5 정산 응답 대조: evaluation_id / settlement_basis=actual_usage /
+  model_calls_used 정수·비음수
+```
+
+**부정 테스트로 부작용 0 입증**: provenance 실패 시
+`record.model_calls_used`와 `service.budget.model_calls_used` 모두
+변경 없음 — 정산 API가 결코 도달하지 않음.
+
+### P1 — RUNNING Resume identity 결합 → 공식 identity 표면
+
+인터페이스에 `get_evaluation_identity` 신설 (공식 `GET /v1/evaluations/{id}`
+표면 — evaluation_id / candidate_id / policy_version). resume RUNNING
+경로에서:
+
+- Workbench identity의 `candidate_id`가 **snapshot의 candidate와
+  일치**해야 재연결 (policy_version도 대조).
+- 불일치 → `RUNNING_IDENTITY_MISMATCH`, identity 미제공 →
+  `RUNNING_IDENTITY_UNVERIFIED` — 둘 다 fail-closed, 원자성 유지.
+- 재연결 직후 중복 submit 방지 및 FAILED 전이 fail-closed 명시
+  테스트 신설.
+
+### P1 — 누적 예산 상한 → 개별 상한과 분리
+
+10단계 예산 검사에 **누적 상한** 추가:
+
+- 개별 상한: 단일 평가 사용량 > 승인 상한 → `BUDGET_CAP_EXCEEDED`
+  (기존).
+- **누적 상한**: `tokens_spent + tokens > approved_budget` →
+  `CUMULATIVE_BUDGET_EXCEEDED` — 검증 완료 후 정산 직전에 검사.
+- Workbench 사용량은 어차피 Workbench 자체 ledger의 권위 있는 기록 —
+  Controller가 정산하지 않은 초과 사용량도 Workbench ledger에 그대로
+  보존 (검증된 결과 Ledger와 구분).
+- 테스트: 승인 1000, 이전 700 + 현재 500(개별 상한 이내) →
+  CUMULATIVE_BUDGET_EXCEEDED, ledger 700 유지.
+
+### R2.3 회귀
+
+- RRSI: **266/266 PASS** (R2.3 신규 5: 정산 부작용 0 부정 테스트 ·
+  RUNNING identity 불일치/미제공 거부 · 재연결 후 중복 submit 방지 ·
+  FAILED 전이 · 누적 예산 분리 검증)
+- Workbench: **114/114 PASS** (변경 0, `dfabe70` 유지)
+- 동일 6개 E2E 시나리오 + 다중 평가 resume 재실행 PASS.
+
+**R2.3 최종 상태: `CONTROLLER_CLOSED_LOOP_VERIFIED`** (Mock·Loopback
+시나리오 한정 — 실제 REST API 연동 승인은 별도 Owner 결정)
+
+다음 단계: Researcher Task REST API 연결 준비 — API·Identity·Budget·
+Permit 검증 무모델 Dry-run 선행, 실제 모델 호출은 별도 Owner 승인 후.
