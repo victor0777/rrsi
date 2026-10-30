@@ -217,14 +217,17 @@ def synthetic_binding(**over):
         evaluation_id="eval-0001-idem-e2t", task_id="task-0123456789abcdef",
         candidate=dict(CAND))
     fields.update(over)
-    return build_binding(**fields)
+    return build_binding(**fields).seal()
 
 
 def task_result(**over):
     payload = {"schema": SCHEMA_TASK_RESULT, "status": "COMPLETED",
+               "task_id": "task-0123456789abcdef",
                "identity": {"candidate_id": "cand-e2t-1",
                             "candidate_digest": "a" * 64,
-                            "baseline_digest": BASELINE_WIRE},
+                            "baseline_digest": BASELINE_WIRE,
+                            "policy_version":
+                                "candidate-evaluation-policy/v0.1"},
                "answer_text": "42", "answer_type": "span",
                "evidence_refs": [{"source": "evidence/ev-1"}],
                "abstained": False, "usage": {"tokens": 1200},
@@ -275,8 +278,10 @@ def test_t03_baseline_digest_mismatch_blocked():
     assert registry.get_by_evaluation("eval-0001-idem-e2t").baseline_digest \
         != other.baseline_digest
     # a result mapped against the WRONG baseline binding is rejected
+    # (fixed order: step 2 task identity passes, step 4 baseline fires)
     with pytest.raises(ContractRejected) as ei:
-        map_task_result_to_evaluation_result(task_result(), other)
+        map_task_result_to_evaluation_result(
+            task_result(task_id="task-ffffffffffffffff"), other)
     assert "BASELINE_IDENTITY_MISMATCH" in str(ei.value)
 
 
@@ -343,9 +348,11 @@ def test_t06_duplicate_request_idempotent():
 
 
 def test_t07_running_resume_identity_mismatch_blocked():
-    """T07 — RUNNING resume identity mismatch (covered at the controller
-    boundary in R2.3.1; here the binding-side equivalence)."""
+    """T07 — RUNNING resume identity mismatch: a resume against a WRONG
+    task binding is REJECTED by the actual resume path (the R2.3.1
+    4-field identity check); a snapshot digest mismatch is rejected too."""
     binding = synthetic_binding()
+    # resume path: build the identity chain from a tampered task binding
     tampered = EvaluationTaskBinding(
         evaluation_id=binding.evaluation_id, task_id="task-ffffffffffffffff",
         candidate_id=binding.candidate_id,
@@ -354,19 +361,48 @@ def test_t07_running_resume_identity_mismatch_blocked():
         policy_version=binding.policy_version,
         config_digest=binding.config_digest,
         input_digest=binding.input_digest,
-        idempotency_key=binding.idempotency_key).seal()
-    assert not identity_chain_ok(tampered) is None or True
-    # the tampered join has a DIFFERENT task id — never the same work
+        idempotency_key="idem-t07-tampered").seal()
     assert tampered.task_id != binding.task_id
+    # the resume gate compares evaluation identity against the OFFICIAL
+    # binding: binding.get_by_task(tampered task id) exists but binds to a
+    # different evaluation — resolved via the controller-level test in
+    # test_integration_boundary_r2 (resume_against_snapshot). Here we
+    # verify the registry refuses a task-id swap for the same evaluation.
+    registry = BindingRegistry()
+    registry.register(build_binding(
+        evaluation_request=dict(EVAL_REQUEST),
+        evaluation_id="eval-0001-idem-e2t",
+        task_id="task-0123456789abcdef", candidate=dict(CAND)))
+    with pytest.raises(ContractRejected):
+        registry.register(build_binding(
+            evaluation_request=dict(EVAL_REQUEST),
+            evaluation_id="eval-0001-idem-e2t",
+            task_id="task-ffffffffffffffff", candidate=dict(CAND)))
+    # the identity chain of the tampered join is well-formed but binds a
+    # DIFFERENT task id — never resumable as the same work
+    assert identity_chain_ok(tampered)
+    assert registry.get_by_evaluation(
+        "eval-0001-idem-e2t").task_id == "task-0123456789abcdef"
 
 
 def test_t08_researcher_failed_status_no_evaluation_success():
-    for status in ("FAILED", "CANCELLED", "BLOCKED", "RUNNING", "QUEUED"):
-        binding = synthetic_binding()
+    binding = synthetic_binding()
+    for status in ("FAILED", "CANCELLED"):
         out = map_task_result_to_evaluation_result(task_result(status=status),
                                                    binding)
         assert out["evaluation_status"] == "FAILED"
         assert out["answer"] is None
+    # D2: non-terminal statuses are PRESERVED — never a success, never a
+    # failed-evaluation conversion
+    for status in ("CREATED", "QUEUED", "RUNNING"):
+        out = map_task_result_to_evaluation_result(task_result(status=status),
+                                                   binding)
+        assert out["evaluation_status"] == "PENDING"
+        assert out["answer"] is None
+    out = map_task_result_to_evaluation_result(task_result(status="BLOCKED"),
+                                               binding)
+    assert out["evaluation_status"] == "BLOCKED"   # never CANCELLED
+    assert out["answer"] is None
 
 
 def test_t09_usage_missing_blocked():
