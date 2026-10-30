@@ -261,10 +261,13 @@ class LoopbackClientAdapter(WorkbenchClientInterface):
     """Official interface over the REAL Workbench EvaluationService through
     the loopback HTTP-shaped transport (no production REST deployment)."""
 
-    def __init__(self, service):
+    def __init__(self, service, *, transport=None):
         from evaluation.loopback import LoopbackEvaluationTransport
         self._service = service
-        self._transport = LoopbackEvaluationTransport(service)
+        # transport injection exists for wire-level fault simulation in
+        # tests (e.g. settlement response tampering) — the ADAPTER code
+        # path under test always runs in full
+        self._transport = transport or LoopbackEvaluationTransport(service)
 
     @property
     def approved_budget_tokens(self) -> int:
