@@ -182,13 +182,14 @@ def test_T12_resume_preserves_history_and_budget():
         BASELINE, answer_quality=0.64))
     loop.complete_evaluation()
     loop.assess_feedback_step()
-    snap = loop.snapshot()
+    snap = loop.seal_snapshot(loop.snapshot())
     # controller restart: fresh controller + fresh client restored from snap
     loop2, client2 = make_loop()
     r = loop2.resume(snap, client=client2)
     assert r["resumed"] and loop2.state == "NEXT_ITERATION"
-    assert loop2.history == snap["history"]  # history preserved
-    assert client2.tokens_spent == snap["client_tokens"]  # budget preserved
+    assert loop2.history == snap["candidate_history"]  # history preserved
+    assert client2.tokens_spent == snap["budget_ledger"][
+        "client_tokens"]  # budget preserved
     assert loop2.iteration == snap["iteration"]
     # accounting CONTINUES after resume — never resets
     generate_valid(loop2, cid="cand-2-a", desc="new tuning after resume")

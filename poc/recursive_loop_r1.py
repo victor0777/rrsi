@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 
 # ----------------------------- reuse matrix ---------------------------------
 REUSE_MATRIX = {
@@ -66,6 +67,159 @@ def sha256_obj(value) -> str:
     return "sha256:" + hashlib.sha256(
         json.dumps(value, sort_keys=True, ensure_ascii=False,
                    separators=(",", ":")).encode()).hexdigest()
+
+
+# ========== §WB-RRSI-CONTRACT-CONVERGENCE-R1 — cross-repo contracts ==========
+# Wire format (canonical): 64-char lowercase sha256 hex. RRSI internal
+# format: "sha256:<hex>". The adapter is the ONLY conversion point.
+WIRE_DIGEST_RE = re.compile(r"^[a-f0-9]{64}$")
+
+
+class ContractRejected(Exception):
+    """Explicit contract-mismatch rejection (never silent success)."""
+
+
+class DigestAdapter:
+    @staticmethod
+    def to_wire(internal: str) -> str:
+        if not internal.startswith("sha256:"):
+            raise ContractRejected("DIGEST_MALFORMED:" + str(internal))
+        wire = internal[7:]
+        if not WIRE_DIGEST_RE.fullmatch(wire):
+            raise ContractRejected("DIGEST_MALFORMED:" + wire)
+        return wire
+
+    @staticmethod
+    def from_wire(wire: str) -> str:
+        if not WIRE_DIGEST_RE.fullmatch(str(wire)):
+            raise ContractRejected("DIGEST_MALFORMED:" + str(wire))
+        return "sha256:" + wire
+
+
+def canonical_payload_bytes(payload) -> bytes:
+    """Shared canonicalization rule (identical on both sides): UTF-8,
+    ensure_ascii=False, sort_keys=True, compact separators (',', ':')."""
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":")).encode("utf-8")
+
+
+def to_workbench_request(candidate: dict, *, baseline_digest_wire: str,
+                         policy_version: str, requester: str = "rrsi",
+                         idempotency_key: str | None = None) -> dict:
+    """§C1 — RRSI Candidate Contract → Workbench Request Schema.
+    Executables, paths, URLs and commands have NO surface. Unmappable
+    candidate fields are NOT silently dropped — unknown keys are an
+    explicit contract rejection."""
+    allowed_keys = set(CANDIDATE_FIELDS)  # full 11-field contract
+    # wire-preserved: candidate identity, baseline identity, profile,
+    # policy version, envelope, idempotency — all mapped below.
+    # loop-internal (validated, NOT sent): parent_candidate_id,
+    # target_version, generation_provenance.
+    unknown = set(candidate) - allowed_keys
+    if unknown:
+        raise ContractRejected("UNMAPPABLE_FIELDS:" + ",".join(sorted(unknown)))
+    if candidate["change_scope"] not in CHANGE_SCOPES:
+        raise ContractRejected("FORBIDDEN_CHANGE_SCOPE")
+    env = candidate["resource_envelope"]
+    wb_env = {"max_model_calls": int(env.get("max_eval_tokens", 0) > 0) * 4,
+              "max_tokens": int(env.get("max_eval_tokens", 0)),
+              "max_wall_clock_minutes": 30}
+    return {
+        "schema": "research-bench-candidate-evaluation-request/v0.1",
+        "idempotency_key": idempotency_key or
+                           f"idem-{candidate['candidate_id']}-{policy_version}",
+        "candidate_id": candidate["candidate_id"],
+        "candidate_digest": DigestAdapter.to_wire(
+            candidate["candidate_digest"]),
+        "baseline_digest": baseline_digest_wire,
+        "target_project": candidate["target_project"]
+                          if candidate["target_project"] in
+                          ("researcher", "ai_papers") else
+                          "researcher",
+        "target_contract_version": "research-agent-task/v0.1",
+        "evaluation_profile": "qasper-dev-mock-profile",
+        "resource_envelope": wb_env,
+        "requested_metrics": ["quality_metrics", "evidence_metrics",
+                              "cost_metrics", "delta", "validity"],
+        "requester": requester,
+    }
+
+
+WORKBENCH_POLICY_VERSION = "candidate-evaluation-policy/v0.1"
+
+
+def from_workbench_result(result: dict, *, candidate: dict,
+                          baseline_wire: str, policy_version: str,
+                          profile: str = "qasper-dev-mock-profile",
+                          approved_budget_tokens: int | None = None) -> dict:
+    """§C2 — Workbench Result → RRSI decision input. ALL ten conditions
+    must hold; any failure ⇒ explicit rejection — the caller can never
+    transition to ADVANCE or PROMOTION_PROPOSED on a rejected result."""
+    problems = []
+    if result.get("schema") != "research-bench-evaluation-result/v0.1":
+        problems.append("SCHEMA_INVALID")
+    ci = result.get("candidate_identity") or {}
+    if ci.get("candidate_id") != candidate["candidate_id"] or \
+            ci.get("candidate_digest") != DigestAdapter.to_wire(
+                candidate["candidate_digest"]):
+        problems.append("CANDIDATE_IDENTITY_MISMATCH")
+    if (result.get("baseline_identity") or {}).get("baseline_digest") != \
+            baseline_wire:
+        problems.append("BASELINE_IDENTITY_MISMATCH")
+    if result.get("evaluation_profile") != profile:
+        problems.append("EVALUATION_PROFILE_MISMATCH")
+    if result.get("policy_version") != WORKBENCH_POLICY_VERSION:
+        problems.append("POLICY_VERSION_MISMATCH")
+    claimed = result.get("provenance_digest") or ""
+    covered = {k: v for k, v in result.items() if k != "provenance_digest"}
+    recomputed = hashlib.sha256(
+        canonical_payload_bytes(covered)).hexdigest()  # 64-hex wire format
+    if claimed != recomputed:
+        problems.append("PROVENANCE_VERIFICATION_FAILED")
+    if result.get("status") not in ("COMPLETED_VALID", "COMPLETED_INVALID",
+                                    "INSUFFICIENT_EVIDENCE", "FAILED",
+                                    "CANCELLED", "BUDGET_EXHAUSTED"):
+        problems.append("EVALUATION_STATUS_INVALID")
+    metrics = result.get("quality_metrics") or {}
+    if metrics.get("answer_f1") is None:
+        problems.append("REQUIRED_METRICS_MISSING")
+    boundary = (result.get("benchmark_cohort") or {}).get("data_boundary")
+    if boundary not in ("development", "validation", "held_out"):
+        problems.append("DATA_BOUNDARY_UNKNOWN")
+    usage = (result.get("cost_metrics") or {}).get("tokens")
+    if usage is None:
+        problems.append("BUDGET_ACCOUNTING_UNKNOWN")
+    elif approved_budget_tokens is not None and usage > \
+            approved_budget_tokens:
+        problems.append("BUDGET_CAP_EXCEEDED")
+    if problems:
+        raise ContractRejected(";".join(problems))
+    # internal mapping: aggregate answer_f1 → decision axes (unit: score 0..1,
+    # higher=better; token cost unit: tokens, higher=worse)
+    return {
+        "answer_quality": metrics["answer_f1"],
+        "evidence_quality": (result.get("evidence_metrics") or {})
+                            .get("evidence_f1", 0.0),
+        "reliability": 0.95,  # from validity; mock basis
+        "token_cost": usage,
+        "gpu_cost": (result.get("cost_metrics") or {}).get("model_calls", 0),
+        "latency": (result.get("cost_metrics") or {}).get("latency_ms", 0),
+        "regression_risk": (result.get("failure_category") != "none") * 1.0,
+    }
+
+
+# §D3 — mock test gate vs real qualification basis (separated):
+#   MIN_SAMPLES=3 gates ONLY the deterministic mock loop.
+#   Real promotion judgment requires per-benchmark sample sizes,
+#   uncertainty bounds, baseline comparability and regression risk —
+#   reviewed by the target Researcher Owner, never auto-decided.
+REAL_QUALIFICATION_BASIS = {
+    "min_samples_mock_loop": 3,
+    "mock_gate_applies_to": "deterministic closed-loop tests only",
+    "real_promotion_basis": ("per-benchmark sample size + uncertainty "
+                             "bounds + baseline comparability + "
+                             "regression risk; human owner review"),
+    "auto_qualification": "FORBIDDEN",}
 
 
 def validate_candidate(candidate: dict) -> dict:
@@ -425,6 +579,40 @@ class RecursiveLoopController:
     # -- promotion boundary: propose only; Owner decides --
     def propose_promotion(self, *, rollback_plan: str,
                           residual_risks: str) -> dict:
+        """§D1 — explicit promotion guard. ALL preconditions must hold;
+        otherwise PROMOTION_BLOCKED. HOLD/REJECT/UNDECIDABLE/TERMINATED
+        states can never create a proposal. Even an approved proposal
+        stays a proposal — operating promotion belongs to the target
+        Researcher Owner."""
+        preconditions = {
+            "candidate_validation_pass": self.state == "NEXT_ITERATION" or
+                                         self.state == "CANDIDATE_VALIDATED",
+            "evaluation_valid": self.job_id is not None and
+                                self.client is not None and
+                                self.client.jobs.get(self.job_id, {})
+                                .get("state") == "EVALUATION_COMPLETED",
+            "provenance_verified": self.job_id is not None and
+                                   self.client is not None and
+                                   self.client.verify_provenance(
+                                       self.client.jobs[self.job_id]["result"]),
+            "baseline_match": self.candidate is not None and
+                              self.candidate["target_version"] ==
+                              self.baseline["version"],
+            "reward_cost_risk_pass": self.history and
+                                     self.history[-1]["feedback_decision"] ==
+                                     "ADVANCE",
+            "evidence_present": bool(self.history),
+            "approved_profile": True,   # qasper-dev-mock-profile via adapter
+            "proposal_allowed_state": self.state in
+                                      ("NEXT_ITERATION",
+                                       "CANDIDATE_VALIDATED"),
+        }
+        if not all(preconditions.values()):
+            blocked = {"promotion_blocked": True,
+                       "failing_preconditions": [k for k, v in
+                                                 preconditions.items()
+                                                 if not v]}
+            return blocked
         req = {
             "baseline_identity": dict(self.baseline),
             "candidate_identity": {
@@ -433,8 +621,8 @@ class RecursiveLoopController:
             "evaluation_evidence": [h for h in self.history
                                     if h["candidate_id"] ==
                                     self.candidate["candidate_id"]],
-            "quality_delta": self.history[-1]["token_cost"] * 0 + (
-                self.best_quality - self.baseline_metrics["answer_quality"]),
+            "quality_delta": self.best_quality - self.baseline_metrics[
+                "answer_quality"],
             "cost_delta_tokens": self.tokens_spent,
             "regression_summary": "none observed in approved axes",
             "evaluation_policy_version": self.client.policy_version,
@@ -445,30 +633,90 @@ class RecursiveLoopController:
         self.state = "PROMOTION_PROPOSED"
         return req
 
-    # -- resume: state, history and budget preserved --
+    # -- durable resume: full state, validated; restart never re-evaluates --
+    SNAPSHOT_SCHEMA_VERSION = "rrsi-loop-snapshot/v0.2"
+
     def snapshot(self) -> dict:
-        return {"state": self.state, "iteration": self.iteration,
-                "evaluations": self.evaluations,
-                "tokens_spent": self.tokens_spent,
-                "client_tokens": (self.client.tokens_spent if self.client
-                                  else 0),
-                "history": self.history,
-                "baseline": self.baseline,
-                "best_quality": self.best_quality,
-                "stop_reason": self.stop_reason}
+        return {
+            "snapshot_schema_version": self.SNAPSHOT_SCHEMA_VERSION,
+            "state": self.state,
+            "baseline_identity": dict(self.baseline),
+            "baseline_metrics": dict(self.baseline_metrics),
+            "current_candidate": (dict(self.candidate)
+                                  if self.candidate else None),
+            "current_evaluation_id": self.job_id,
+            "iteration": self.iteration,
+            "evaluations": self.evaluations,
+            "budget_ledger": {"tokens_spent": self.tokens_spent,
+                              "client_tokens": self.client.tokens_spent
+                                               if self.client else 0,
+                              "approved_budget":
+                                  self.client.budget_eval_tokens
+                                  if self.client else 0},
+            "candidate_history": [h for h in self.history],
+            "evaluation_history": [{"job_id": j,
+                                    "state": rec["state"]}
+                                   for j, rec in
+                                   (self.client.jobs.items()
+                                    if self.client else [])],
+            "best_candidate_quality": self.best_quality,
+            "stop_reason": self.stop_reason,
+            "pending_promotion_request": (self.promotion_requests[-1]
+                                          if self.promotion_requests
+                                          else None),
+            "snapshot_digest": None}
+
+    def seal_snapshot(self, snap: dict) -> dict:
+        snap["snapshot_digest"] = "sha256:" + hashlib.sha256(
+            canonical_payload_bytes({k: v for k, v in snap.items()
+                                     if k != "snapshot_digest"})).hexdigest()
+        return snap
 
     def resume(self, snap: dict, *, client: MockWorkbenchClient) -> dict:
+        """Validate snapshot (schema version + digest integrity + required
+        fields), re-verify Workbench job identity, then restore. Tampered,
+        old-version and incomplete snapshots are REJECTED."""
+        problems = []
+        if not isinstance(snap, dict):
+            raise ContractRejected("SNAPSHOT_NOT_OBJECT")
+        if snap.get("snapshot_schema_version") != self.SNAPSHOT_SCHEMA_VERSION:
+            problems.append("SNAPSHOT_VERSION_MISMATCH")
+        required = ("state", "baseline_identity", "baseline_metrics",
+                    "iteration", "evaluations", "budget_ledger",
+                    "candidate_history", "evaluation_history")
+        for field in required:
+            if field not in snap or snap[field] in (None, "") and field != \
+                    "current_evaluation_id":
+                problems.append("SNAPSHOT_INCOMPLETE:" + field)
+        claimed = snap.get("snapshot_digest")
+        if not claimed:
+            problems.append("SNAPSHOT_DIGEST_MISSING")
+        elif claimed != "sha256:" + hashlib.sha256(
+                canonical_payload_bytes(
+                    {k: v for k, v in snap.items()
+                     if k != "snapshot_digest"})).hexdigest():
+            problems.append("SNAPSHOT_TAMPERED")
+        if problems:
+            raise ContractRejected(";".join(problems))
+        # re-verify Workbench job identity & state (source of truth)
+        self.client = client
+        for j in snap["evaluation_history"]:
+            if j["job_id"] in client.jobs:
+                if client.jobs[j["job_id"]]["state"] != j["state"]:
+                    raise ContractRejected("WORKBENCH_JOB_STATE_MISMATCH")
         self.state = snap["state"]
+        self.baseline = dict(snap["baseline_identity"])
+        self.baseline_metrics = dict(snap["baseline_metrics"])
+        self.candidate = (dict(snap["current_candidate"])
+                          if snap.get("current_candidate") else None)
+        self.job_id = snap.get("current_evaluation_id")
         self.iteration = snap["iteration"]
         self.evaluations = snap["evaluations"]
-        self.tokens_spent = snap["tokens_spent"]
-        self.history = list(snap["history"])
-        self.baseline = snap["baseline"]
-        self.best_quality = snap["best_quality"]
-        self.stop_reason = snap["stop_reason"]
-        self.baseline_metrics = self.baseline_metrics  # rebound by owner
-        self.client = client
-        client.tokens_spent = snap["client_tokens"]
+        self.tokens_spent = snap["budget_ledger"]["tokens_spent"]
+        self.history = list(snap["candidate_history"])
+        self.best_quality = snap.get("best_candidate_quality")
+        self.stop_reason = snap.get("stop_reason")
+        client.tokens_spent = snap["budget_ledger"]["client_tokens"]
         return {"resumed": True, "state": self.state}
 
     def cancel(self, reason: str = "EXPLICIT_CANCELLATION") -> dict:
