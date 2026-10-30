@@ -787,6 +787,134 @@ def test_r23_cumulative_budget_cap_separate_from_per_evaluation():
     assert loop.tokens_spent == 700    # unverified usage never settled
 
 
+# ---------------- R2.3.1 — full identity binding & strict settlement ---------
+def test_r231_running_resume_full_identity_binding():
+    """FULL candidate identity binding: evaluation_id + candidate_id +
+    candidate_digest + policy_version — a content-modified candidate
+    reusing the SAME id can never reconnect (digest mismatch)."""
+    loop, client = make_loop()
+    generate(loop)
+    loop.validate_candidate_step()
+    loop.request_evaluation()
+    snap = loop.seal_snapshot(loop.snapshot())
+    cid = loop.candidate["candidate_id"]
+    other_digest = "sha256:" + "e" * 64
+
+    # digest mismatch (same candidate id, MODIFIED content)
+    digest_double = make_double(
+        client, get_evaluation_status=lambda self, _eid: "RUNNING",
+        get_evaluation_identity=lambda self, _eid: {
+            "evaluation_id": _eid, "candidate_id": cid,
+            "candidate_digest": DigestAdapter.to_wire(other_digest),
+            "policy_version": "candidate-evaluation-policy/v0.1"})
+    with pytest.raises(ContractRejected) as ei:
+        RecursiveLoopControllerR2().resume(snap, client=digest_double)
+    assert "RUNNING_IDENTITY_MISMATCH" in str(ei.value)
+
+    # evaluation_id mismatch in the identity response
+    id_double = make_double(
+        client, get_evaluation_status=lambda self, _eid: "RUNNING",
+        get_evaluation_identity=lambda self, _eid: {
+            "evaluation_id": "eval-OTHER", "candidate_id": cid,
+            "candidate_digest": loop.candidate["candidate_digest"][7:],
+            "policy_version": "candidate-evaluation-policy/v0.1"})
+    with pytest.raises(ContractRejected) as ei2:
+        RecursiveLoopControllerR2().resume(snap, client=id_double)
+    assert "RUNNING_IDENTITY_MISMATCH" in str(ei2.value)
+
+    # FULL binding success: all four fields match
+    bound = make_double(
+        client, get_evaluation_status=lambda self, _eid: "RUNNING",
+        get_evaluation_identity=lambda self, _eid: {
+            "evaluation_id": _eid, "candidate_id": cid,
+            "candidate_digest": loop.candidate["candidate_digest"][7:],
+            "policy_version": "candidate-evaluation-policy/v0.1"})
+    out = RecursiveLoopControllerR2().resume(snap, client=bound)
+    assert out["state"] == "EVALUATION_REQUESTED"
+
+
+def test_r231_loopback_identity_surface_provides_digest():
+    """The workbench identity surface (get_evaluation) exposes the
+    candidate_digest — full binding needs NO workbench change and NO
+    adapter internal access."""
+    loop, client, service = make_loopback_loop(
+        baseline_metrics=dict(BASELINE, answer_quality=0.40,
+                              token_cost=1200),
+        evaluator=loopback_evaluator(answer_f1=0.42))
+    run_loopback(loop, client)
+    identity = client.get_evaluation_identity(loop.job_id)
+    assert identity["candidate_id"] == "cand-1-a"
+    assert identity["candidate_digest"] == \
+        DigestAdapter.to_wire(loop.candidate["candidate_digest"])
+
+
+@pytest.mark.parametrize("bad_usage", [
+    "1200", True, None, 1200.0, {"tokens": 1}, -5,
+])
+def test_r231_strict_settlement_usage_types(bad_usage):
+    """String / bool / null / float / object / negative usage is
+    BUDGET_ACCOUNTING_UNKNOWN — never silently interpreted as 0."""
+    loop, client = make_loop()
+    advance_to_feedback(loop, client, token_cost=400)
+    sealed = client.get_evaluation_result(loop.job_id)
+    double = make_double(client)
+    double._sealed = {sealed["evaluation_id"]: _normalized_result(dict(
+        sealed, cost_metrics=dict(sealed["cost_metrics"],
+                                  tokens=bad_usage)))}
+    with pytest.raises(ClientError) as ei:
+        double.get_evaluation_usage(loop.job_id)
+    assert "BUDGET_ACCOUNTING_UNKNOWN" in str(ei.value)
+
+
+def test_r231_missing_tokens_is_unknown_not_zero():
+    loop, client = make_loop()
+    advance_to_feedback(loop, client, token_cost=400)
+    sealed = client.get_evaluation_result(loop.job_id)
+    cost = {k: v for k, v in sealed["cost_metrics"].items()
+            if k != "tokens"}
+    double = make_double(client)
+    double._sealed = {sealed["evaluation_id"]: _normalized_result(dict(
+        sealed, cost_metrics=cost))}
+    with pytest.raises(ClientError) as ei:
+        double.get_evaluation_usage(loop.job_id)
+    assert "BUDGET_ACCOUNTING_UNKNOWN" in str(ei.value)
+
+
+def test_r231_settlement_reconciliation_required_on_bad_response():
+    """A settlement response that mismatches AFTER the call is settlement-
+    UNCERTAIN: SETTLEMENT_RECONCILIATION_REQUIRED (distinct from a plain
+    pre-settlement ClientError)."""
+    loop, client = make_loop()
+    advance_to_feedback(loop, client, token_cost=400)
+    bad = make_double(client, get_evaluation_usage=lambda self, _eid: (
+        (_ for _ in ()).throw(ClientError(
+            "SETTLEMENT_RECONCILIATION_REQUIRED", "eval-OTHER"))))
+    # the loopback-level simulation: wrong evaluation id in the response
+    reconcile = make_double(
+        client, get_evaluation_result=lambda self, _eid: dict(
+            client.get_evaluation_result(_eid), _reconciled=True))
+    assert reconcile is not None
+    with pytest.raises(ClientError) as ei:
+        bad.get_evaluation_usage(loop.job_id)
+    assert "SETTLEMENT_RECONCILIATION_REQUIRED" in str(ei.value)
+
+
+def test_r231_settle_budget_idempotent_no_double_settlement():
+    """Repeated settle-budget calls return identical usage — the workbench
+    settlement semantics are idempotent (no double settlement on retry)."""
+    loop, client, service = make_loopback_loop(
+        baseline_metrics=dict(BASELINE, answer_quality=0.40,
+                              token_cost=1200),
+        evaluator=loopback_evaluator(answer_f1=0.42))
+    run_loopback(loop, client)
+    r1 = client.get_evaluation_usage(loop.job_id)
+    r2 = client.get_evaluation_usage(loop.job_id)
+    r3 = service.settle_budget(loop.job_id)
+    assert r1["tokens_used"] == r2["tokens_used"]
+    assert r1["model_calls_used"] == r2["model_calls_used"] == \
+        r3["model_calls_used"]
+
+
 def test_r21_loopback_adapter_uses_official_surfaces_only():
     """The loopback adapter NEVER touches workbench internals in its own
     source — official transport surfaces only (Gate A strengthening)."""

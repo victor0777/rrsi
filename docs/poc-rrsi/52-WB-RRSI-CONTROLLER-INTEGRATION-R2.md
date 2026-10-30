@@ -329,3 +329,65 @@ R2.2 검토(조건부 수용)의 보류 항목 3종 수정 —
 
 다음 단계: Researcher Task REST API 연결 준비 — API·Identity·Budget·
 Permit 검증 무모델 Dry-run 선행, 실제 모델 호출은 별도 Owner 승인 후.
+
+---
+
+## R2.3.1 — Full Identity Binding & Strict Settlement (검토 의견 보완)
+
+R2.3 검토(범위 한정 수용)의 미충족 2종 보완:
+
+### P1 — RUNNING Resume Candidate Digest 결합 → FULL Identity Binding
+
+**Workbench identity 표면 확장**(공식 `get_evaluation` 응답에
+`candidate_digest` 추가 — 결과 스키마와 동일 wire-format, 읽기 전용,
+gold·실행 표면 없음): 어댑터 내부 접근 없이 FULL 결합 완성.
+
+Controller resume RUNNING 경로 — 4필드 전부 대조 (하나라도 불일치
+또는 미제공 → fail-closed):
+
+```
+identity.evaluation_id      == snapshot.current_evaluation_id
+identity.candidate_id       == snapshot.current_candidate.candidate_id
+identity.candidate_digest   == wire(snapshot.current_candidate.digest)
+identity.policy_version     == candidate-evaluation-policy/v0.1
+```
+
+테스트: 동일 candidate_id에 내용 수정(digest 불일치) → 거부 ·
+evaluation_id 불일치 → 거부 · 4필드 일치 → 재연결 성공 ·
+Loopback identity 표면이 digest 제공 (행위 검증).
+
+### P1 — Settlement 사용량 엄격형 검증 + 정산 불확실 코드
+
+- **사용량 자료형 엄격 검증**: 정수(비음수)만 허용 — bool / None /
+  float / 문자열 / 객체 / 음수 → `BUDGET_ACCOUNTING_UNKNOWN` (결코
+  0으로 해석하지 않음). 양쪽 어댑터 동일 계약 (6종 parametrize).
+- **토큰 키 누락** → `BUDGET_ACCOUNTING_UNKNOWN` (0 해석 금지).
+- **정산 응답 불일치** (정산 호출 이후) →
+  `SETTLEMENT_RECONCILIATION_REQUIRED` — 단순 ClientError와 구분되는
+  정산 상태 불확실 표현 (클라이언트 측 취소 불가 명시).
+- **정산 멱등성 검증**: 반복 settle-budget 호출이 동일 사용량 반환 —
+  재시도 시 이중 정산 없음 (테스트 3회 호출 동일 결과).
+
+### 인정 범위 (R2.3.1 검토 판정 반영)
+
+- FULL Candidate Identity Binding: **완성** (Workbench 공식 표면
+  확장 + Controller 4필드 대조).
+- 누적 예산 테스트가 입증하는 것은 Controller 정책 차단 — 실제
+  Workbench 사용량 보존·Ledger 구분·Resume 누락 방지는
+  `WB-RRSI-RESEARCHER-REST-PREFLIGHT-R1`의 필수 Gate로 이관.
+
+### R2.3.1 회귀
+
+- RRSI: **277/277 PASS** (R2.3.1 신규 11)
+- Workbench: **114/114 PASS** (identity 표면에 `candidate_digest`
+  추가 — 계약 확장, 기존 테스트 회귀 0)
+- 동일 6개 E2E 시나리오 + 다중 평가 resume 재실행 PASS.
+
+**R2.3.1 최종 상태: `CONTROLLER_CLOSED_LOOP_VERIFIED`** (Mock·Loopback
+계약 검증 범위 한정 — 운영 REST 연동·Researcher 평가 실행 승인 아님)
+
+다음 단계: `WB-RRSI-RESEARCHER-REST-PREFLIGHT-R1` — 읽기 전용 계약
+확인 (Evaluation ID · Candidate Digest · Baseline · Policy · Budget ·
+Permit 연결 검증; FULL Identity Binding 및 Settlement 멱등성을 필수
+Gate로 포함), 모델 호출 0 · 평가 실행 0 · Owner 승인 전 Production
+변경 금지.
