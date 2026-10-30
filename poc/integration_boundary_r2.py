@@ -126,6 +126,73 @@ def _pending_id(content) -> str:
                    separators=(",", ":")).encode("utf-8"))[:16]
 
 
+class CandidateRevisionRegistry:
+    """Revision issuance authority — SINGLE-EXECUTION scope only.
+
+    A2 revision rules:
+      same candidate id + same content  -> existing revision returned
+      same candidate id + changed content -> NEW revision (monotonic)
+      same revision + different content digest -> REVISION_DIGEST_MISMATCH
+        (integrity error — a recorded revision is NEVER rewritten)
+      past revisions are immutable and stay verifiable
+
+    SCOPE LIMITS (explicit, not claimed otherwise):
+      * monotonicity is guaranteed ONLY within one RRSI execution run —
+        concurrent issuers, restarts and persistent registries are NOT
+        covered (no durable registry exists in this prototype);
+      * GLOBAL revision issuance is a separate cross-repository contract
+        (PENDING — doc 55 §WB): until that contract lands, revisions
+        issued here must not be interpreted as globally comparable.
+    """
+
+    def __init__(self):
+        # candidate_id -> {revision: content digest}
+        self.issued: dict[str, dict[str, str]] = {}
+
+    def issue(self, candidate_id: str, content) -> dict:
+        digest = _sha256(content)
+        known = self.issued.setdefault(candidate_id, {})
+        for revision, recorded in known.items():
+            if recorded == digest:
+                # same id + same content -> EXISTING revision preserved
+                return candidate_identity(candidate_id, revision, content)
+        revision = f"r{len(known) + 1}"
+        identity = candidate_identity(candidate_id, revision, content)
+        known[revision] = identity["candidate_content_digest"]
+        return identity
+
+    def verify(self, candidate_id: str, revision: str, content) -> None:
+        """Integrity check against the ISSUED record: the same revision
+        presenting a different content digest is an integrity error."""
+        recorded = self.issued.get(candidate_id, {}).get(revision)
+        if recorded is None:
+            raise ContractRejected(
+                f"REVISION_NOT_ISSUED:{candidate_id}/{revision}")
+        if recorded != _sha256(content):
+            raise ContractRejected(
+                f"REVISION_DIGEST_MISMATCH:{candidate_id}/{revision} "
+                f"content changed")
+
+    def restore(self, candidate_id: str, revision: str,
+                content_digest: str) -> None:
+        """Re-register a revision issued in a PREVIOUS execution (resume
+        basis). Integrity rules: the same revision re-presented with a
+        DIFFERENT content digest is an integrity error; a NEW revision
+        can never be inserted BELOW the already-issued count (monotonic
+        within the merged history)."""
+        known = self.issued.setdefault(candidate_id, {})
+        if revision in known:
+            if known[revision] != content_digest:
+                raise ContractRejected(
+                    f"REVISION_DIGEST_MISMATCH:{candidate_id}/{revision} "
+                    f"content changed")
+            return                                  # already recorded
+        if len(known) + 1 > int(revision[1:]):
+            raise ContractRejected(
+                f"REVISION_MONOTONICITY_VIOLATION:{candidate_id}/{revision}")
+        known[revision] = content_digest
+
+
 # ================= WS-A2 — evaluation snapshot binding =======================
 class EvaluationSnapshotBinding:
     """Immutable 8-field execution-time snapshot. New candidate
@@ -160,19 +227,47 @@ class EvaluationSnapshotBinding:
 
 # ==================== WS-A3 — resume against snapshot ========================
 def resume_against_snapshot(snapshot: EvaluationSnapshotBinding,
-                            workbench_identity: dict) -> dict:
-    """Resume policy (WS-A3): compare ONLY against the execution-time
-    snapshot. ``workbench_identity`` = the OFFICIAL workbench identity
-    surface for this evaluation (evaluation id, candidate id/revision/
-    digest, baseline digest, policy version, task binding id).
-    The LATEST candidate is never consulted here — a changed latest
-    candidate does NOT block an old evaluation's resume. Snapshot
-    content/digest mismatch IS rejected (full R2.3.1 binding kept)."""
+                            workbench_identity: dict, *,
+                            official_binding_record: dict | None = None,
+                            researcher_task_available: bool = True) -> dict:
+    """Resume policy (WS-C): compare against the execution-time snapshot
+    AND the OFFICIAL Workbench binding record.
+
+    Two distinct objects are verified (WS-C1):
+      * the CANDIDATE SNAPSHOT — fixed at evaluation creation time;
+      * the TASK BINDING RECORD — created when the researcher task was
+        assigned (the task id NEVER predates the evaluation).
+
+    Fixed order (WS-C2):
+      1 evaluation snapshot integrity -> 2 OFFICIAL binding record
+      availability (missing lookup = BINDING_AUTHORITY_UNAVAILABLE,
+      never assumed) -> 3 binding record integrity (tamper-evident) ->
+      4 binding record evaluation id -> 5 binding record task id vs the
+      workbench identity surface (the identity surface carries the task
+      binding the PREVIOUS execution used — a different task binding is
+      a CHANGED binding and rejects the resume) -> 6 candidate id/
+      revision/digest -> 7 baseline digest -> 8 policy version ->
+      9 researcher task availability.
+
+    The LATEST candidate is never consulted — a changed latest candidate
+    does NOT block an old evaluation's resume. No new researcher task is
+    ever created from this path (WS-C4)."""
     if not snapshot.verify():
         raise ContractRejected("SNAPSHOT_TAMPERED")
+    if not official_binding_record:
+        raise ContractRejected(
+            "BINDING_AUTHORITY_UNAVAILABLE:official_binding_record")
+    out = verify_official_binding_record(official_binding_record)
+    if out["evaluation_id"] != snapshot.evaluation_id:
+        raise ContractRejected("BINDING_EVALUATION_ID_MISMATCH")
+    wb_task = workbench_identity.get("task_binding_id") or ""
+    if not wb_task:
+        raise ContractRejected("TASK_BINDING_IDENTITY_MISSING")
+    if official_binding_record.get("task_id") != wb_task:
+        # the current official task binding differs from the one the
+        # previous execution used -> NEVER resume across bindings
+        raise ContractRejected("TASK_BINDING_IDENTITY_MISMATCH")
     problems = []
-    if workbench_identity.get("evaluation_id") != snapshot.evaluation_id:
-        problems.append("EVALUATION_ID_MISMATCH")
     if workbench_identity.get("candidate_id") != snapshot.candidate_id:
         problems.append("CANDIDATE_ID_MISMATCH")
     if workbench_identity.get("candidate_revision") != \
@@ -192,13 +287,15 @@ def resume_against_snapshot(snapshot: EvaluationSnapshotBinding,
     if workbench_identity.get("evaluation_policy_version") != \
             snapshot.evaluation_policy_version:
         problems.append("POLICY_VERSION_MISMATCH")
-    if not workbench_identity.get("task_binding_id"):
-        # workbench task binding identity is REQUIRED for resume
-        problems.append("TASK_BINDING_IDENTITY_MISSING")
     if problems:
         raise ContractRejected(";".join(problems))
+    if not researcher_task_available:
+        # researcher task lookup unavailable -> resume BLOCKED (no new
+        # task is created from local state — WS-C4)
+        raise ContractRejected("RESEARCHER_TASK_LOOKUP_UNAVAILABLE")
     return {"resume": "ALLOWED", "evaluation_id": snapshot.evaluation_id,
-            "candidate_revision": snapshot.candidate_revision}
+            "candidate_revision": snapshot.candidate_revision,
+            "task_id": official_binding_record["task_id"]}
 
 
 # ================ WS-B2 — contract compatibility (not SHA) ===================

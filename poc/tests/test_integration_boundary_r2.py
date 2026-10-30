@@ -40,6 +40,11 @@ from poc.rest_preflight_r1 import (  # noqa: E402
 )
 
 BASELINE_WIRE = hashlib.sha256(b"baseline").hexdigest()
+CONFIGURATION = {"task_type": "qa",
+                 "model_profile": "qasper-dev-mock-profile",
+                 "tool_policy": {"mode": "offline"},
+                 "configuration_identity": {"profile":
+                                            "qasper-dev-mock-profile"}}
 
 
 def make_loop(**kw):
@@ -145,9 +150,37 @@ def workbench_identity_fixture(**over):
 
 
 def test_ws_a3_resume_allowed_on_matching_snapshot():
-    out = resume_against_snapshot(snapshot_fixture(),
-                                  workbench_identity_fixture())
+    out = resume_against_snapshot(
+        snapshot_fixture(), workbench_identity_fixture(),
+        official_binding_record=official_record_for(snapshot_fixture()))
     assert out["resume"] == "ALLOWED"
+    assert out["task_id"] == "wb-task-0001"
+
+
+def official_record_for(snapshot, task_id="wb-task-0001", **over):
+    """Official Workbench binding record matching a snapshot (synthetic
+    projection fixture — the real Workbench API is PENDING, WB-1)."""
+    record = {"schema": "research-bench-evaluation-task-binding/v0.1",
+              "contract_version":
+                  "research-bench-evaluation-task-binding/v0.1",
+              "evaluation_id": snapshot.evaluation_id,
+              "task_id": task_id,
+              "candidate_id": snapshot.candidate_id,
+              "candidate_revision": snapshot.candidate_revision,
+              "candidate_content_digest":
+                  snapshot.candidate_content_digest.replace("sha256:", ""),
+              "baseline_revision": snapshot.baseline_revision,
+              "baseline_content_digest":
+                  snapshot.baseline_content_digest.replace("sha256:", ""),
+              "policy_version": snapshot.evaluation_policy_version,
+              "configuration_identity": {"profile": "qasper-dev-mock-profile"}}
+    covered = {k: v for k, v in record.items()
+               if k != "binding_record_digest"}
+    record["binding_record_digest"] = hashlib.sha256(json.dumps(
+        covered, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":")).encode()).hexdigest()
+    record.update(over)
+    return record
 
 
 def test_ws_a3_latest_candidate_change_never_blocks_old_resume():
@@ -159,16 +192,18 @@ def test_ws_a3_latest_candidate_change_never_blocks_old_resume():
                         "content_digest": "f" * 64}   # latest moved on
     assert latest_candidate["revision"] != \
         snapshot_fixture().candidate_revision
-    out = resume_against_snapshot(snapshot_fixture(),
-                                  workbench_identity_fixture())
+    out = resume_against_snapshot(
+        snapshot_fixture(), workbench_identity_fixture(),
+        official_binding_record=official_record_for(snapshot_fixture()))
     assert out["resume"] == "ALLOWED"
 
 
 def test_ws_a3_snapshot_digest_mismatch_rejected():
     with pytest.raises(ContractRejected) as ei:
-        resume_against_snapshot(snapshot_fixture(),
-                                workbench_identity_fixture(
-                                    candidate_content_digest="f" * 64))
+        resume_against_snapshot(
+            snapshot_fixture(),
+            workbench_identity_fixture(candidate_content_digest="f" * 64),
+            official_binding_record=official_record_for(snapshot_fixture()))
     assert "CANDIDATE_DIGEST_MISMATCH" in str(ei.value)
 
 
@@ -183,8 +218,10 @@ def test_ws_a3_baseline_and_policy_and_task_binding_required():
                        ({"task_binding_id": ""},
                         "TASK_BINDING_IDENTITY_MISSING")):
         with pytest.raises(ContractRejected) as ei:
-            resume_against_snapshot(snapshot_fixture(),
-                                    workbench_identity_fixture(**over))
+            resume_against_snapshot(
+                snapshot_fixture(), workbench_identity_fixture(**over),
+                official_binding_record=official_record_for(
+                    snapshot_fixture()))
         assert code in str(ei.value)
 
 
@@ -309,6 +346,8 @@ def _mapping_binding():
         baseline_digest=BASELINE_WIRE,
         policy_version="candidate-evaluation-policy/v0.1",
         config_digest="cfg", input_digest="in", idempotency_key="idem-wsd",
+        candidate_revision="r2", baseline_revision="r1",
+        configuration_identity={"profile": "qasper-dev-mock-profile"},
         request_digest="req-1").seal()
 
 
@@ -316,6 +355,8 @@ def wsd_result(**over):
     payload = {"schema": "research-agent-task-result/v0.1",
                "task_id": "task-5555555555555555", "status": "COMPLETED",
                "identity": {"candidate_id": "cand-wsd-1",
+                            "candidate_revision": "r2",
+                            "baseline_revision": "r1",
                             "candidate_digest": "5" * 64,
                             "baseline_digest": BASELINE_WIRE,
                             "policy_version":
@@ -392,6 +433,7 @@ def e2_request(idem, digest_hex):
             "target_contract_version": "research-agent-task/v0.1",
             "idempotency_key": idem, "candidate_id": "cand-x-1",
             "candidate_digest": "sha256:" + digest_hex,
+            "candidate_revision": "r2", "baseline_revision": "r1",
             "baseline_digest": BASELINE_WIRE,
             "resource_envelope": {"max_wall_clock_minutes": 1}}
 
@@ -401,11 +443,15 @@ def test_e2_same_task_id_different_evaluation_rejected():
     registry.register(build_binding(
         evaluation_request=e2_request("idem-x-0001", "1" * 64),
         evaluation_id="eval-A", task_id="task-1111111111111111",
-        candidate={"candidate_digest": "sha256:" + "1" * 64}))
+        candidate={"candidate_digest": "sha256:" + "1" * 64,
+                   "candidate_revision": "r2"},
+        configuration=dict(CONFIGURATION)))
     b2 = build_binding(
         evaluation_request=e2_request("idem-x-0002", "2" * 64),
         evaluation_id="eval-B", task_id="task-1111111111111111",
-        candidate={"candidate_digest": "sha256:" + "2" * 64})
+        candidate={"candidate_digest": "sha256:" + "2" * 64,
+                   "candidate_revision": "r2"},
+        configuration=dict(CONFIGURATION))
     with pytest.raises(ContractRejected) as ei:
         registry.register(b2)
     assert "TASK_BINDING_CONFLICT" in str(ei.value)
@@ -416,13 +462,17 @@ def test_e2_same_key_different_request_rejected():
     registry.register(build_binding(
         evaluation_request=e2_request("idem-y-0001", "1" * 64),
         evaluation_id="eval-Y", task_id="task-2222222222222222",
-        candidate={"candidate_digest": "sha256:" + "1" * 64}))
+        candidate={"candidate_digest": "sha256:" + "1" * 64,
+                   "candidate_revision": "r2"},
+        configuration=dict(CONFIGURATION)))
     other_req = e2_request("idem-y-0001", "2" * 64)
     with pytest.raises(ContractRejected):
         registry.register(build_binding(
             evaluation_request=other_req, evaluation_id="eval-Y2",
             task_id="task-3333333333333333",
-            candidate={"candidate_digest": "sha256:" + "2" * 64}))
+            candidate={"candidate_digest": "sha256:" + "2" * 64,
+                       "candidate_revision": "r2"},
+            configuration=dict(CONFIGURATION)))
 
 
 # ================= controller-level resume regression ========================

@@ -48,9 +48,15 @@ def _sha256(payload) -> str:
 
 
 # ======================= C1 — Request mapping / binding ======================
-def map_evaluation_to_task_request(evaluation_request: dict,
-                                   candidate: dict) -> dict:
+def map_evaluation_to_task_request(evaluation_request: dict, candidate: dict,
+                                   *, configuration: dict) -> dict:
     """Workbench Evaluation Request → Researcher Task Request.
+
+    The run-time CONFIGURATION is bound EXPLICITLY (WS-E): task type,
+    model profile, tool policy and the configuration identity MUST be
+    supplied per evaluation — there is NO hardcoded default (a missing
+    configuration is a CONTRACT_REJECTED, never silently filled with
+    the synthetic fixture values).
 
     Bindings carried forward: evaluation id (as request_id — the
     researcher idempotency key, so an evaluation retries to the SAME
@@ -58,41 +64,70 @@ def map_evaluation_to_task_request(evaluation_request: dict,
     the input payload (the researcher validates only as opaque identity
     — it never scores against them). Gold/evaluation content has NO
     surface: FORBIDDEN_BODY_KEYS of the researcher rejects it."""
+    if not configuration or not configuration.get("configuration_identity"):
+        raise ContractRejected("CONFIGURATION_BINDING_REQUIRED")
     input_payload = {
         "task_contract": evaluation_request["target_contract_version"],
         "candidate_id": evaluation_request["candidate_id"],
+        "candidate_revision": evaluation_request["candidate_revision"],
         "candidate_digest": evaluation_request["candidate_digest"],
+        "baseline_revision": evaluation_request["baseline_revision"],
         "baseline_digest": evaluation_request["baseline_digest"],
         "evaluation_policy_version": WORKBENCH_POLICY_VERSION_R2,
         "question": (evaluation_request.get("input")
                      or {"question": ""}).get("question", ""),
     }
-    envelope = candidate.get("resource_envelope") or {}
+    envelope = evaluation_request.get("resource_envelope") or {}
     return {
         "schema": SCHEMA_TASK_REQUEST,
         "request_id": "eval-" + evaluation_request["idempotency_key"],
-        "task_type": "qa",
+        "task_type": configuration["task_type"],
         "input": input_payload,
-        "model_profile": "qasper-dev-mock-profile",
+        "model_profile": configuration["model_profile"],
         "data_snapshot_digest": _sha256(input_payload),
-        "budget": {"wall_clock_s": 60 * evaluation_request[
-            "resource_envelope"].get("max_wall_clock_minutes", 30)},
-        "tool_policy": {"mode": "offline"},
+        "budget": {"wall_clock_s": 60 * envelope.get(
+            "max_wall_clock_minutes", 30)},
+        "tool_policy": configuration["tool_policy"],
+        "configuration_identity": configuration["configuration_identity"],
     }
 
 
 WORKBENCH_POLICY_VERSION_R2 = "candidate-evaluation-policy/v0.1"
 
+# Synthetic fixture configuration — allowed ONLY for no-model fixture
+# tests. A REAL integration adapter must NEVER auto-apply this value;
+# it binds the run-time configuration explicitly per evaluation (WS-E).
+SYNTHETIC_EVALUATION_CONFIGURATION = {
+    "task_type": "qa",
+    "model_profile": "qasper-dev-mock-profile",
+    "tool_policy": {"mode": "offline"},
+    "configuration_identity": {
+        "profile": "qasper-dev-mock-profile",
+        "fixture": "synthetic-no-model-fixture"},
+}
+
 
 class EvaluationTaskBinding:
     """PERSISTENT join between the two identifier spaces. A binding is
-    immutable once created; retries MUST return the existing task id."""
+    immutable once created; retries MUST return the existing task id.
+
+    Revision-aware contract (WS-B): candidate_revision and
+    baseline_revision are REQUIRED (the legacy ``r1`` default is
+    REMOVED — a caller that does not supply a revision is blocked with
+    BINDING_REVISION_REQUIRED, never silently assumed r1). The
+    configuration identity is bound at creation time (WS-E)."""
 
     def __init__(self, *, evaluation_id: str, task_id: str, candidate_id: str,
                  candidate_digest: str, baseline_digest: str,
                  policy_version: str, config_digest: str,
                  input_digest: str, idempotency_key: str,
-                 request_digest: str = "", candidate_revision: str = "r1"):
+                 candidate_revision: str, baseline_revision: str,
+                 configuration_identity: dict,
+                 request_digest: str = ""):
+        if not candidate_revision or not baseline_revision:
+            raise ContractRejected("BINDING_REVISION_REQUIRED")
+        if not configuration_identity:
+            raise ContractRejected("CONFIGURATION_BINDING_REQUIRED")
         self.evaluation_id = evaluation_id
         self.task_id = task_id
         self.candidate_id = candidate_id
@@ -104,6 +139,9 @@ class EvaluationTaskBinding:
         self.idempotency_key = idempotency_key
         self.request_digest = request_digest           # C2 conflict basis
         self.candidate_revision = candidate_revision
+        self.baseline_revision = baseline_revision
+        self.configuration_identity = configuration_identity
+        self.configuration_digest = _sha256(configuration_identity)
         self.record_digest = None
 
     def seal(self) -> "EvaluationTaskBinding":
@@ -142,6 +180,11 @@ class BindingRegistry:
         if binding.idempotency_key in self.by_idempotency:
             existing = self.by_evaluation[self.by_idempotency[
                 binding.idempotency_key]]
+            # same key + DIFFERENT configuration -> explicit conflict (F14):
+            # configuration changes never ride an existing idempotency key
+            if existing.configuration_digest != \
+                    binding.configuration_digest:
+                raise ContractRejected("IDEMPOTENCY_CONFLICT:configuration")
             if existing.request_digest != binding.request_digest:
                 raise ContractRejected("IDEMPOTENCY_CONFLICT")
             if existing.record_digest != binding.seal().record_digest:
@@ -175,10 +218,23 @@ class BindingRegistry:
 
 
 def build_binding(*, evaluation_request: dict, evaluation_id: str,
-                  task_id: str, candidate: dict) -> EvaluationTaskBinding:
-    """Create the identity chain for one evaluation ↔ task pair."""
+                  task_id: str, candidate: dict,
+                  configuration: dict) -> EvaluationTaskBinding:
+    """Create the identity chain for one evaluation ↔ task pair.
+
+    Revision-aware (WS-B): the candidate dict MUST carry
+    ``candidate_revision`` (the controller-issued revision) and the
+    evaluation request MUST carry ``baseline_revision`` — missing
+    revisions are blocked (never silently r1)."""
     task_request = map_evaluation_to_task_request(evaluation_request,
-                                                  candidate)
+                                                  candidate,
+                                                  configuration=configuration)
+    revision = candidate.get("candidate_revision") or ""
+    if not revision:
+        raise ContractRejected("CANDIDATE_REVISION_REQUIRED")
+    baseline_revision = evaluation_request.get("baseline_revision") or ""
+    if not baseline_revision:
+        raise ContractRejected("BASELINE_REVISION_REQUIRED")
     return EvaluationTaskBinding(
         evaluation_id=evaluation_id, task_id=task_id,
         candidate_id=evaluation_request["candidate_id"],
@@ -189,7 +245,31 @@ def build_binding(*, evaluation_request: dict, evaluation_id: str,
         config_digest=_sha256({"model_profile": task_request["model_profile"],
                                "tool_policy": task_request["tool_policy"]}),
         input_digest=task_request["data_snapshot_digest"],
-        idempotency_key=evaluation_request["idempotency_key"])
+        idempotency_key=evaluation_request["idempotency_key"],
+        candidate_revision=revision, baseline_revision=baseline_revision,
+        configuration_identity=configuration["configuration_identity"])
+
+
+def build_legacy_binding(*, evaluation_request: dict, evaluation_id: str,
+                         task_id: str, candidate: dict,
+                         configuration: dict) -> dict:
+    """EXPLICIT legacy adapter (WS-B1): builds a binding WITHOUT a
+    candidate revision. Legacy bindings are marked ``legacy`` and their
+    result mapping NEVER claims a verified revision — a legacy binding
+    can never be mistaken for a revision-verified one."""
+    task_request = map_evaluation_to_task_request(evaluation_request,
+                                                  candidate,
+                                                  configuration=configuration)
+    return {"legacy": True, "evaluation_id": evaluation_id,
+            "task_id": task_id, "candidate_id":
+            evaluation_request["candidate_id"],
+            "candidate_digest": DigestAdapter.to_wire(
+                candidate["candidate_digest"]),
+            "baseline_digest": evaluation_request["baseline_digest"],
+            "policy_version": WORKBENCH_POLICY_VERSION_R2,
+            "input_digest": task_request["data_snapshot_digest"],
+            "idempotency_key": evaluation_request["idempotency_key"],
+            "revision_provided": False}
 
 
 # ================== C2 — Result mapping (fail-closed) ========================
@@ -200,19 +280,28 @@ def map_task_result_to_evaluation_result(task_result: dict,
                                          evaluation_id=None) -> dict:
     """Researcher Task Result → Workbench-shaped evaluation inputs.
 
-    FIXED validation order (WS-D D1):
-      1 binding record integrity -> 2 evaluation/task identity ->
-      3 candidate id/revision/digest -> 4 baseline revision/digest
-      (MISSING baseline is REJECTED — never conditionally skipped) ->
-      5 policy version -> 6 researcher result schema ->
-      7 result digest/provenance -> 8 usage schema -> 9 evidence/answer
-      -> 10 task status → evaluation result.
-    Fail-closed: required identity missing is NEVER success;
-    BLOCKED is a NON-TERMINAL researcher state (never CANCELLED, never
-    a completed evaluation); missing usage is
-    BUDGET_ACCOUNTING_UNKNOWN (never 0).
+    FIXED validation order (WS-B3 — common to ALL statuses, then
+    status-specific WS-D branches):
+      1 binding record digest -> 2 evaluation/task id -> 3 candidate id
+      -> 4 candidate revision (missing in result = the researcher
+      contract does not provide it: CONTRACT_CAPABILITY_MISSING;
+      different = CANDIDATE_REVISION_MISMATCH) -> 5 candidate content
+      digest -> 6 baseline revision (same rules) -> 7 baseline content
+      digest -> 8 policy version -> 9 result schema -> 10 status-
+      specific validation.
+
+    WS-D status-specific validation:
+      non-terminal (CREATED/QUEUED/RUNNING/BLOCKED): NO terminal result
+      digest required; the reported usage is validated but only VERIFIED
+      values can ever be settled (an unvalidatable value is never
+      treated as verified usage); BLOCKED stays NON-TERMINAL.
+      COMPLETED: result digest -> usage -> evidence/answer (a terminal
+      result without its digest is RESULT_DIGEST_MISSING).
+      FAILED/CANCELLED: terminal status -> failure/cancellation reason
+      -> actual usage -> terminal record integrity (a missing reason is
+      TERMINAL_REASON_MISSING; missing usage is never 0).
     """
-    # 1 binding record integrity
+    # 1 binding record digest
     if not binding.verify():
         raise ContractRejected("BINDING_RECORD_TAMPERED")
     # 2 evaluation / task identity
@@ -222,26 +311,49 @@ def map_task_result_to_evaluation_result(task_result: dict,
             task_result.get("evaluation_id") != evaluation_id:
         raise ContractRejected("EVALUATION_IDENTITY_MISMATCH")
     identity = task_result.get("identity") or {}
-    # 3 candidate id / revision / digest
-    if identity.get("candidate_id") != binding.candidate_id or \
-            identity.get("candidate_digest") != binding.candidate_digest:
+    legacy_binding = not binding.candidate_revision   # explicit legacy only
+    # 3 candidate id
+    if identity.get("candidate_id") != binding.candidate_id:
         raise ContractRejected("CANDIDATE_IDENTITY_MISMATCH")
-    # 4 baseline revision / digest — MISSING IS A REJECTION
+    # 4 candidate revision
+    result_revision = identity.get("candidate_revision")
+    if not legacy_binding:
+        if result_revision is None:
+            # the CURRENT researcher result contract provides NO revision
+            # (RA gap, doc 55): blocked — never assumed, never invented
+            raise ContractRejected(
+                "CONTRACT_CAPABILITY_MISSING:candidate_revision_in_result")
+        if result_revision != binding.candidate_revision:
+            raise ContractRejected("CANDIDATE_REVISION_MISMATCH")
+    # 5 candidate content digest
+    if identity.get("candidate_digest") != binding.candidate_digest:
+        raise ContractRejected("CANDIDATE_IDENTITY_MISMATCH")
+    # 6 baseline revision
+    result_baseline_revision = identity.get("baseline_revision")
+    if not legacy_binding:
+        if result_baseline_revision is None:
+            raise ContractRejected(
+                "CONTRACT_CAPABILITY_MISSING:baseline_revision_in_result")
+        if result_baseline_revision != binding.baseline_revision:
+            raise ContractRejected("BASELINE_REVISION_MISMATCH")
+    # 7 baseline content digest — MISSING IS A REJECTION
     baseline_digest = identity.get("baseline_digest")
     if not baseline_digest:
         raise ContractRejected("BASELINE_IDENTITY_MISSING")
     if baseline_digest != binding.baseline_digest:
         raise ContractRejected("BASELINE_IDENTITY_MISMATCH")
-    # 5 policy version
+    # 8 policy version
     if identity.get("policy_version") != binding.policy_version:
         raise ContractRejected("POLICY_VERSION_MISMATCH")
-    # 6 researcher result schema + status validity
+    # 9 result schema + status validity
     if task_result.get("schema") != SCHEMA_TASK_RESULT:
         raise ContractRejected("SCHEMA_INVALID")
     status = task_result.get("status")
     if status not in RESEARCHER_STATUSES:
         raise ContractRejected("TASK_STATUS_UNKNOWN")  # unknown ≠ success
-    # 8 usage schema (before digest: usage feeds the ledger discipline)
+    # 10 status-specific validation
+    # 10a usage schema (validated for EVERY status — unvalidatable values
+    # are never counted as verified usage, never interpreted as 0)
     usage = task_result.get("usage") or {}
     tokens = usage.get("tokens")
     if isinstance(tokens, bool) or not isinstance(tokens, int) or \
@@ -250,27 +362,39 @@ def map_task_result_to_evaluation_result(task_result: dict,
     if approved_budget_tokens is not None and tokens > \
             approved_budget_tokens:
         raise ContractRejected("BUDGET_CAP_EXCEEDED")
-    # 10 non-terminal task statuses are PRESERVED (never a success)
+    # 10b non-terminal task statuses are PRESERVED (never a success)
     if status in ("CREATED", "QUEUED", "RUNNING"):
         return {"evaluation_status": "PENDING", "task_status": status,
-                "answer": None, "evidence_refs": [], "tokens_used": tokens}
+                "answer": None, "evidence_refs": [], "tokens_used": tokens,
+                "verified_usage": False, "revision_enforced": not legacy_binding}
     if status == "BLOCKED":
         return {"evaluation_status": "BLOCKED", "task_status": "BLOCKED",
                 "resumable": (task_result.get("error") or {}).get(
                     "resumable"), "answer": None, "evidence_refs": [],
-                "tokens_used": tokens}
+                "tokens_used": tokens, "verified_usage": False,
+                "revision_enforced": not legacy_binding}
     if status in ("FAILED", "CANCELLED"):
+        # terminal reason is a REQUIRED field of the terminal contract
+        reason = (task_result.get("error") or {}).get("reason") or \
+            task_result.get("failure_reason")
+        if not reason:
+            raise ContractRejected("TERMINAL_REASON_MISSING")
         # failed/cancelled task → failed evaluation basis (never a success)
         return {"evaluation_status": "FAILED", "task_status": status,
                 "failure_category": "researcher_task_" + status.lower(),
-                "answer": None, "evidence_refs": [], "tokens_used": tokens}
-    # 7 result digest / provenance (COMPLETED only)
+                "terminal_reason": reason, "answer": None,
+                "evidence_refs": [], "tokens_used": tokens,
+                "verified_usage": True, "revision_enforced":
+                not legacy_binding}
+    # 10c COMPLETED — result digest / provenance FIRST
     result_digest = task_result.get("result_digest")
-    if not result_digest or result_digest != "sha256:" + _sha256(
+    if not result_digest:
+        raise ContractRejected("RESULT_DIGEST_MISSING")
+    if result_digest != "sha256:" + _sha256(
             {k: v for k, v in task_result.items()
              if k != "result_digest"}):
         raise ContractRejected("RESULT_DIGEST_MISMATCH")
-    # 9 evidence / answer
+    # 10d evidence / answer
     if not task_result.get("answer_text") and not \
             task_result.get("abstained"):
         raise ContractRejected("ANSWER_MISSING")   # success without answer
@@ -283,7 +407,8 @@ def map_task_result_to_evaluation_result(task_result: dict,
             "failure_category": "none",
             "answer": task_result["answer_text"],
             "evidence_refs": evidence,
-            "tokens_used": tokens}
+            "tokens_used": tokens, "verified_usage": True,
+            "revision_enforced": not legacy_binding}
 
 
 def identity_chain_ok(binding: EvaluationTaskBinding) -> bool:

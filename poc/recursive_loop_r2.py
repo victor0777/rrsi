@@ -97,6 +97,20 @@ class WorkbenchClientInterface:
         {"evaluation_id", "candidate_id", "policy_version"}."""
         raise NotImplementedError
 
+    # Capability flag: whether this client provides the OFFICIAL
+    # evaluation↔task binding record lookup. The REAL Workbench has NO
+    # such API yet (cross-repo request WB-1, doc 55) — clients without
+    # the capability are marked PENDING_EXTERNAL_CONTRACT on resume,
+    # never silently assumed to have verified a binding.
+    OFFICIAL_BINDING_CAPABLE = False
+
+    def get_official_binding_record(self, evaluation_id: str) -> dict:
+        """OFFICIAL Workbench binding record (10-field, tamper-evident).
+        Default: the capability does not exist — fail-closed
+        BINDING_AUTHORITY_UNAVAILABLE (never assumed or invented)."""
+        raise ClientError("BINDING_AUTHORITY_UNAVAILABLE",
+                          "official binding lookup not implemented")
+
 
 def _canonical_digest(payload: dict) -> str:
     return hashlib.sha256(canonical_payload_bytes(payload)).hexdigest()
@@ -120,12 +134,20 @@ def _normalized_result(envelope: dict) -> dict:
 class MockClientAdapter(WorkbenchClientInterface):
     """Official interface over the R1 mock client. The adapter — not the
     controller — owns the mapping from the mock job surface to the CANONICAL
-    Workbench Result, so the controller consumes ONE result contract."""
+    Workbench Result, so the controller consumes ONE result contract.
+
+    This adapter provides a SYNTHETIC binding-record projection (single-
+    execution registry basis) — the REAL Workbench binding API is still
+    PENDING (WB-1); the projection is marked as such inside the record."""
+
+    OFFICIAL_BINDING_CAPABLE = True
 
     def __init__(self, mock: MockWorkbenchClient):
         self._mock = mock
         self._identity: dict[str, dict] = {}
         self._sealed: dict[str, dict] = {}
+        from poc.integration_boundary_r2 import CandidateRevisionRegistry
+        self._revisions = CandidateRevisionRegistry()   # synthetic projection
 
     @property
     def approved_budget_tokens(self) -> int:
@@ -138,9 +160,19 @@ class MockClientAdapter(WorkbenchClientInterface):
             raise ClientError("SUBMISSION_REJECTED", ",".join(
                 sub.get("problems", [])))
         evaluation_id = sub["job_id"]
+        # SYNTHETIC revision projection: the adapter issues the revision
+        # itself over the same content the controller uses (same rule,
+        # single-execution scope) — the wire candidate contract is frozen
+        # and carries no revision field (WB-2 pending)
+        identity = self._revisions.issue(
+            candidate["candidate_id"],
+            {"description": candidate["change_description"],
+             "profile": candidate["execution_profile"],
+             "envelope": candidate["resource_envelope"]})
         self._identity[evaluation_id] = {
             "candidate_id": candidate["candidate_id"],
             "candidate_digest": candidate["candidate_digest"],
+            "candidate_revision": identity["candidate_revision"],
             "baseline_digest_wire": baseline_digest_wire,
             "policy_version": policy_version, "requester": requester}
         self._sealed.pop(evaluation_id, None)
@@ -226,7 +258,42 @@ class MockClientAdapter(WorkbenchClientInterface):
                 "candidate_id": ident["candidate_id"],
                 "candidate_digest": DigestAdapter.to_wire(
                     ident["candidate_digest"]),
-                "policy_version": ident["policy_version"]}
+                "policy_version": ident["policy_version"],
+                "task_binding_id": "task-" + hashlib.sha256(
+                    ("task-binding:" + evaluation_id).encode()).hexdigest()[:16]}
+
+    def get_official_binding_record(self, evaluation_id: str) -> dict:
+        """SYNTHETIC projection of the official Workbench binding record
+        (the real API is PENDING, WB-1). The record is built from this
+        adapter's own single-execution identity store and is marked as a
+        projection inside ``configuration_identity`` — it is NOT a real
+        Workbench API result and never marked as one."""
+        ident = self._identity.get(evaluation_id)
+        if ident is None:
+            raise ClientError("EVALUATION_NOT_FOUND", evaluation_id)
+        record = {
+            "schema": "research-bench-evaluation-task-binding/v0.1",
+            "contract_version":
+                "research-bench-evaluation-task-binding/v0.1",
+            "evaluation_id": evaluation_id,
+            "task_id": "task-" + hashlib.sha256(
+                ("task-binding:" + evaluation_id).encode()).hexdigest()[:16],
+            "candidate_id": ident["candidate_id"],
+            "candidate_revision": ident["candidate_revision"],
+            "candidate_content_digest": DigestAdapter.to_wire(
+                ident["candidate_digest"]),
+            "baseline_revision": "r1",   # single-execution issuance
+            "baseline_content_digest": ident["baseline_digest_wire"],
+            "policy_version": ident["policy_version"],
+            "configuration_identity": {
+                "profile": "qasper-dev-mock-profile",
+                "projection": "synthetic-mock-adapter"},
+        }
+        covered = {k: v for k, v in record.items()
+                   if k != "binding_record_digest"}
+        record["binding_record_digest"] = hashlib.sha256(
+            canonical_payload_bytes(covered)).hexdigest()
+        return record
 
     def cancel_evaluation(self, evaluation_id: str) -> dict:
         try:
@@ -369,10 +436,16 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
     def __init__(self, **kw):
         super().__init__(**kw)
         self.baseline_wire: str | None = None
+        self.baseline_revision: str | None = None
         self.approved_budget_tokens: int = 0
         self.validated_result: dict | None = None
         self.decision_records: list[dict] = []
         self.evaluation_history: list[dict] = []
+        from poc.integration_boundary_r2 import CandidateRevisionRegistry
+        # revision issuance authority — SINGLE-EXECUTION scope only (A2):
+        # revisions issued here are monotonic within THIS controller run
+        # and are never globally comparable (persistent registry absent)
+        self._revisions = CandidateRevisionRegistry()
 
     # -- A: binding carries the wire baseline identity --
     def bind_baseline(self, baseline_id: str, version: str, metrics: dict, *,
@@ -382,6 +455,10 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
                                     client=client)
         self.baseline_wire = baseline_wire or DigestAdapter.to_wire(
             sha256_obj({"baseline_id": baseline_id, "version": version}))
+        # single-execution baseline revision issuance — immutable within
+        # this run (the global baseline revision authority is a separate
+        # contract, PENDING)
+        self.baseline_revision = "r1"
         self.approved_budget_tokens = client.approved_budget_tokens
         return out
 
@@ -396,6 +473,32 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
             raise WorkbenchMockBlocked("BUDGET_EXHAUSTED")
 
     # -- A: submission through the official interface only --
+    def generate_candidate(self, **fields) -> dict:
+        """Revision-aware candidate generation (WS-A): the candidate
+        content is {change_description, execution_profile,
+        resource_envelope} — the SAME content the frozen R1
+        ``candidate_digest`` hashes (identical canonicalization), so
+        ``candidate_content_digest`` equals ``candidate_digest`` in
+        VALUE and meaning (alias evidence recorded in doc 55 §A1).
+        The revision is kept in CONTROLLER ATTRIBUTES — the frozen R1
+        candidate→request mapping contract rejects unknown keys, so
+        adding fields to the wire candidate requires a Contract
+        Version transition (PENDING, WB-2); nothing is injected into
+        the frozen surface here."""
+        out = super().generate_candidate(**fields)
+        if out.get("state") != "CANDIDATE_GENERATED":
+            return out
+        content = {
+            "description": self.candidate["change_description"],
+            "profile": self.candidate["execution_profile"],
+            "envelope": self.candidate["resource_envelope"]}
+        identity = self._revisions.issue(self.candidate["candidate_id"],
+                                         content)
+        self.candidate_revision = identity["candidate_revision"]
+        self.candidate_content_digest = \
+            self.candidate["candidate_digest"]      # same semantics
+        return out
+
     def request_evaluation(self) -> dict:
         self._check_budget()
         sub = self.client.submit_evaluation(
@@ -408,7 +511,8 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
             self.evaluations += 1
             self.evaluation_history.append({
                 "evaluation_id": self.job_id, "candidate_digest":
-                self.candidate["candidate_digest"]})
+                self.candidate["candidate_digest"], "candidate_revision":
+                getattr(self, "candidate_revision", "") or ""})
         return {"state": self.state, "evaluation_id": self.job_id,
                 "duplicate": sub["duplicate"]}
 
@@ -641,6 +745,8 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
                 dict(record)}
 
     # -- D: snapshot is controller-local (no workbench internals) --
+    SNAPSHOT_SCHEMA_VERSION = "rrsi-loop-snapshot/v0.3"
+
     def snapshot(self) -> dict:
         return {
             "snapshot_schema_version": self.SNAPSHOT_SCHEMA_VERSION,
@@ -648,6 +754,8 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
             "baseline_identity": dict(self.baseline),
             "baseline_metrics": dict(self.baseline_metrics),
             "baseline_wire": self.baseline_wire,
+            "baseline_revision": self.baseline_revision,
+            "candidate_revision": getattr(self, "candidate_revision", None),
             "current_candidate": (dict(self.candidate)
                                   if self.candidate else None),
             "current_evaluation_id": self.job_id,
@@ -681,8 +789,8 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
         if snap.get("snapshot_schema_version") != self.SNAPSHOT_SCHEMA_VERSION:
             problems.append("SNAPSHOT_VERSION_MISMATCH")
         required = ("state", "baseline_identity", "baseline_metrics",
-                    "baseline_wire", "iteration", "evaluations",
-                    "budget_ledger", "candidate_history",
+                    "baseline_wire", "baseline_revision", "iteration",
+                    "evaluations", "budget_ledger", "candidate_history",
                     "evaluation_history")
         for field in required:                            # 3-5 fields
             if field not in snap or snap[field] in (None, "") and field != \
@@ -697,6 +805,29 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
             problems.append("SNAPSHOT_TAMPERED")
         if problems:
             raise ContractRejected(";".join(problems))
+        # revision integrity (WS-A): a v0.3 snapshot MUST carry the
+        # candidate revision + content digest (TOP-LEVEL fields — the
+        # frozen wire-candidate contract carries no revision), and the
+        # digest must match the CANDIDATE CONTENT — tampering with
+        # either fails with an explicit code (never silently assumed
+        # r1). A revision issued in a previous execution is re-
+        # registered via restore().
+        snap_candidate = snap.get("current_candidate") or {}
+        revision = snap.get("candidate_revision") or ""
+        if not revision:
+            raise ContractRejected("CANDIDATE_REVISION_MISSING_IN_SNAPSHOT")
+        content = {
+            "description": snap_candidate["change_description"],
+            "profile": snap_candidate["execution_profile"],
+            "envelope": snap_candidate["resource_envelope"]}
+        expected = sha256_obj(content)
+        if expected != snap_candidate["candidate_digest"]:
+            raise ContractRejected(
+                "REVISION_DIGEST_MISMATCH:snapshot candidate content "
+                "changed")
+        # NOTE: the registry restore happens ONLY in the commit block —
+        # a failed resume must leave the controller (and its revision
+        # registry) UNCHANGED (WS-C4/F15)
         # ---- verification on LOCAL copies (nothing committed yet) ----
         local_tokens = snap["budget_ledger"]["tokens_spent"]
         restore = {"state": snap["state"], "stop_reason":
@@ -729,6 +860,41 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
                         WORKBENCH_POLICY_VERSION:
                     raise ContractRejected(
                         "RUNNING_IDENTITY_MISMATCH:" + evaluation_id)
+                # WS-C2: OFFICIAL binding record verification — the
+                # identity surface carries the task binding the previous
+                # execution used; the CURRENT official record must bind
+                # the SAME evaluation + task. A different (or tampered,
+                # or unavailable) binding NEVER resumes.
+                if getattr(client, "OFFICIAL_BINDING_CAPABLE", False):
+                    try:
+                        record = client.get_official_binding_record(
+                            evaluation_id)
+                    except ClientError as exc:
+                        raise ContractRejected(
+                            "BINDING_AUTHORITY_UNAVAILABLE:" + exc.code)
+                    from poc.integration_boundary_r2 import (
+                        verify_official_binding_record)
+                    verified = verify_official_binding_record(record)
+                    if verified["evaluation_id"] != evaluation_id:
+                        raise ContractRejected(
+                            "BINDING_EVALUATION_ID_MISMATCH:" +
+                            evaluation_id)
+                    wb_task = identity.get("task_binding_id") or ""
+                    if not wb_task:
+                        raise ContractRejected(
+                            "TASK_BINDING_IDENTITY_MISSING")
+                    if record["task_id"] != wb_task:
+                        raise ContractRejected(
+                            "TASK_BINDING_IDENTITY_MISMATCH:" +
+                            evaluation_id)
+                    self._official_binding_lookup = "VERIFIED"
+                else:
+                    # capability does not exist (real Workbench API
+                    # PENDING, WB-1): the R2.3.1 4-field identity binding
+                    # above is the FULL available check — marked, never
+                    # claimed as a verified official binding
+                    self._official_binding_lookup = \
+                        "PENDING_EXTERNAL_CONTRACT"
                 restore = {"state": "EVALUATION_REQUESTED", "stop_reason":
                            None}
             elif status == "CANCELLED":
@@ -760,12 +926,15 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
             if wb_total > local_tokens:
                 local_tokens = wb_total  # workbench usage authoritative
         # ---- 10 commit: single atomic assignment block ----
+        self._revisions.restore(snap_candidate["candidate_id"], revision,
+                                expected)
         self.client = client
         self.baseline = dict(snap["baseline_identity"])
         self.baseline_metrics = dict(snap["baseline_metrics"])
         self.baseline_wire = snap["baseline_wire"]
         self.candidate = (dict(snap["current_candidate"])
                           if snap.get("current_candidate") else None)
+        self.candidate_revision = snap.get("candidate_revision")
         self.job_id = snap.get("current_evaluation_id")
         self.iteration = snap["iteration"]
         self.evaluations = snap["evaluations"]
@@ -777,7 +946,9 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
         self.best_quality = snap.get("best_candidate_quality")
         self.state = restore["state"]
         self.stop_reason = restore["stop_reason"]
-        return {"resumed": True, "state": self.state}
+        return {"resumed": True, "state": self.state,
+                "official_binding_lookup": getattr(
+                    self, "_official_binding_lookup", "NOT_APPLICABLE")}
 
     def cancel(self, reason: str = "EXPLICIT_CANCELLATION") -> dict:
         self._terminate(reason)

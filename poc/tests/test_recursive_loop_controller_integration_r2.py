@@ -822,15 +822,15 @@ def test_r231_running_resume_full_identity_binding():
         RecursiveLoopControllerR2().resume(snap, client=id_double)
     assert "RUNNING_IDENTITY_MISMATCH" in str(ei2.value)
 
-    # FULL binding success: all four fields match
+    # FULL binding success: all four fields match (identity surface
+    # carries the task binding of the previous execution)
     bound = make_double(
         client, get_evaluation_status=lambda self, _eid: "RUNNING",
-        get_evaluation_identity=lambda self, _eid: {
-            "evaluation_id": _eid, "candidate_id": cid,
-            "candidate_digest": loop.candidate["candidate_digest"][7:],
-            "policy_version": "candidate-evaluation-policy/v0.1"})
+        get_evaluation_identity=lambda self, _eid: dict(
+            client.get_evaluation_identity(_eid)))
     out = RecursiveLoopControllerR2().resume(snap, client=bound)
     assert out["state"] == "EVALUATION_REQUESTED"
+    assert out["official_binding_lookup"] == "VERIFIED"
 
 
 def test_r231_loopback_identity_surface_provides_digest():

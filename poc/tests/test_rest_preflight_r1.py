@@ -201,6 +201,7 @@ EVAL_REQUEST = {
     "schema": "research-bench-candidate-evaluation-request/v0.1",
     "idempotency_key": "idem-e2t-0001", "candidate_id": "cand-e2t-1",
     "candidate_digest": "a" * 64, "baseline_digest": BASELINE_WIRE,
+    "candidate_revision": "r2", "baseline_revision": "r1",
     "target_project": "researcher",
     "target_contract_version": "research-agent-task/v0.1",
     "evaluation_profile": "qasper-dev-mock-profile",
@@ -208,14 +209,21 @@ EVAL_REQUEST = {
                           "max_wall_clock_minutes": 30},
     "requested_metrics": ["quality_metrics"], "input": {"question": "q"}}
 CAND = {"candidate_digest": "sha256:" + "a" * 64,
+        "candidate_revision": "r2",
         "resource_envelope": {"max_eval_tokens": 40000}}
+# synthetic fixture configuration (no-model tests ONLY — never a default)
+CONFIGURATION = {
+    "task_type": "qa", "model_profile": "qasper-dev-mock-profile",
+    "tool_policy": {"mode": "offline"},
+    "configuration_identity": {"profile": "qasper-dev-mock-profile",
+                               "fixture": "synthetic-no-model-fixture"}}
 
 
 def synthetic_binding(**over):
     fields = dict(
         evaluation_request=dict(EVAL_REQUEST),
         evaluation_id="eval-0001-idem-e2t", task_id="task-0123456789abcdef",
-        candidate=dict(CAND))
+        candidate=dict(CAND), configuration=dict(CONFIGURATION))
     fields.update(over)
     return build_binding(**fields).seal()
 
@@ -224,6 +232,8 @@ def task_result(**over):
     payload = {"schema": SCHEMA_TASK_RESULT, "status": "COMPLETED",
                "task_id": "task-0123456789abcdef",
                "identity": {"candidate_id": "cand-e2t-1",
+                            "candidate_revision": "r2",
+                            "baseline_revision": "r1",
                             "candidate_digest": "a" * 64,
                             "baseline_digest": BASELINE_WIRE,
                             "policy_version":
@@ -250,7 +260,8 @@ def test_t01_normal_identity_mapping():
     assert identity_chain_ok(out)
     # request mapping carries the identity forward
     task_request = map_evaluation_to_task_request(
-        dict(EVAL_REQUEST), {"resource_envelope": {}})
+        dict(EVAL_REQUEST), {"resource_envelope": {}},
+        configuration=dict(CONFIGURATION))
     assert task_request["request_id"].startswith("eval-")
     assert task_request["schema"] == SCHEMA_TASK_REQUEST
 
@@ -259,8 +270,8 @@ def test_t02_candidate_digest_mismatch_blocked():
     binding = synthetic_binding()
     with pytest.raises(ContractRejected) as ei:
         map_task_result_to_evaluation_result(
-            task_result(identity={"candidate_id": "cand-e2t-1",
-                                  "candidate_digest": "b" * 64}), binding)
+            task_result(identity=dict(task_result()["identity"],
+                                      candidate_digest="b" * 64)), binding)
     assert "CANDIDATE_IDENTITY_MISMATCH" in str(ei.value)
 
 
@@ -271,7 +282,8 @@ def test_t03_baseline_digest_mismatch_blocked():
                                 idempotency_key="idem-e2t-0002"),
         evaluation_id="eval-OTHER", task_id="task-ffffffffffffffff",
         candidate={"candidate_digest": "sha256:" + "a" * 64,
-                   "resource_envelope": {}})
+                   "candidate_revision": "r2", "resource_envelope": {}},
+        configuration=dict(CONFIGURATION))
     registry = BindingRegistry()
     registry.register(binding)
     registry.register(other)
@@ -291,7 +303,8 @@ def test_t04_policy_version_mismatch_blocked():
         evaluation_request=dict(EVAL_REQUEST),
         evaluation_id="eval-0001-idem-e2t", task_id="task-ffffffffffffffff",
         candidate={"candidate_digest": "sha256:" + "a" * 64,
-                   "resource_envelope": {}})
+                   "candidate_revision": "r2", "resource_envelope": {}},
+        configuration=dict(CONFIGURATION))
     assert wrong_policy.policy_version == \
         binding.policy_version          # contract-fixed on both sides
     # the identity chain binds the policy version; a binding record whose
@@ -311,7 +324,8 @@ def test_t05_task_id_change_blocked():
         evaluation_id="eval-0001-idem-e2t",
         task_id="task-ffffffffffffffff",
         candidate={"candidate_digest": "sha256:" + "a" * 64,
-                   "resource_envelope": {}})
+                   "candidate_revision": "r2", "resource_envelope": {}},
+        configuration=dict(CONFIGURATION))
     with pytest.raises(ContractRejected) as ei:
         registry.register(impostor)
     assert "EVALUATION_BINDING_CONFLICT" in str(ei.value)
@@ -330,13 +344,15 @@ def test_t06_duplicate_request_idempotent():
         evaluation_id="eval-0001-idem-e2t",
         task_id="task-0123456789abcdef",
         candidate={"candidate_digest": "sha256:" + "a" * 64,
-                   "resource_envelope": {}}))
+                   "candidate_revision": "r2", "resource_envelope": {}},
+        configuration=dict(CONFIGURATION)))
     r2 = registry.register(build_binding(   # same key, same request
         evaluation_request=dict(EVAL_REQUEST),
         evaluation_id="eval-0001-idem-e2t",
         task_id="task-0123456789abcdef",
         candidate={"candidate_digest": "sha256:" + "a" * 64,
-                   "resource_envelope": {}}))
+                   "candidate_revision": "r2", "resource_envelope": {}},
+        configuration=dict(CONFIGURATION)))
     assert r1 is r2 and len(registry.by_evaluation) == 1
     with pytest.raises(ContractRejected):   # same key, different content
         registry.register(build_binding(
@@ -344,7 +360,8 @@ def test_t06_duplicate_request_idempotent():
                                     candidate_digest="9" * 64),
             evaluation_id="eval-9999-OTHER", task_id="task-eeeeeeeeeeeeeeee",
             candidate={"candidate_digest": "sha256:" + "9" * 64,
-                       "resource_envelope": {}}))
+                       "candidate_revision": "r2", "resource_envelope": {}},
+            configuration=dict(CONFIGURATION)))
 
 
 def test_t07_running_resume_identity_mismatch_blocked():
@@ -361,6 +378,9 @@ def test_t07_running_resume_identity_mismatch_blocked():
         policy_version=binding.policy_version,
         config_digest=binding.config_digest,
         input_digest=binding.input_digest,
+        candidate_revision=binding.candidate_revision,
+        baseline_revision=binding.baseline_revision,
+        configuration_identity=binding.configuration_identity,
         idempotency_key="idem-t07-tampered").seal()
     assert tampered.task_id != binding.task_id
     # the resume gate compares evaluation identity against the OFFICIAL
@@ -372,12 +392,14 @@ def test_t07_running_resume_identity_mismatch_blocked():
     registry.register(build_binding(
         evaluation_request=dict(EVAL_REQUEST),
         evaluation_id="eval-0001-idem-e2t",
-        task_id="task-0123456789abcdef", candidate=dict(CAND)))
+        task_id="task-0123456789abcdef", candidate=dict(CAND),
+        configuration=dict(CONFIGURATION)))
     with pytest.raises(ContractRejected):
         registry.register(build_binding(
             evaluation_request=dict(EVAL_REQUEST),
             evaluation_id="eval-0001-idem-e2t",
-            task_id="task-ffffffffffffffff", candidate=dict(CAND)))
+            task_id="task-ffffffffffffffff", candidate=dict(CAND),
+            configuration=dict(CONFIGURATION)))
     # the identity chain of the tampered join is well-formed but binds a
     # DIFFERENT task id — never resumable as the same work
     assert identity_chain_ok(tampered)
@@ -388,9 +410,10 @@ def test_t07_running_resume_identity_mismatch_blocked():
 def test_t08_researcher_failed_status_no_evaluation_success():
     binding = synthetic_binding()
     for status in ("FAILED", "CANCELLED"):
-        out = map_task_result_to_evaluation_result(task_result(status=status),
-                                                   binding)
+        out = map_task_result_to_evaluation_result(
+            task_result(status=status, error={"reason": "mock"}), binding)
         assert out["evaluation_status"] == "FAILED"
+        assert out["terminal_reason"] == "mock"
         assert out["answer"] is None
     # D2: non-terminal statuses are PRESERVED — never a success, never a
     # failed-evaluation conversion
