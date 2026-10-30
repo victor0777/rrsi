@@ -407,7 +407,7 @@ def test_gate_d_resume_rejects_state_mismatch_with_workbench():
 
     class Double(MockClientAdapter):
         def get_evaluation_status(self, evaluation_id):
-            return "CANCELLED"
+            return "EXPLODED"     # unknown workbench state -> fail-closed
 
     with pytest.raises(ContractRejected) as ei:
         loop.resume(snap, client=Double(client._mock))
@@ -509,7 +509,7 @@ def test_r21_resume_atomic_on_identity_failure():
 
     class Double(MockClientAdapter):
         def get_evaluation_status(self, evaluation_id):
-            return "CANCELLED"    # workbench state mismatch mid-restore
+            return "EXPLODED"    # unknown workbench state mid-restore
 
     with pytest.raises(ContractRejected) as ei:
         fresh.resume(snap, client=Double(client._mock))
@@ -568,6 +568,98 @@ def test_r21_multi_evaluation_resume_cumulative_ledger():
     with pytest.raises(ContractRejected) as ei:
         fresh2.resume(snap, client=low)
     assert "SNAPSHOT_BUDGET_EXCEEDS_WORKBENCH" in str(ei.value)
+
+
+# ---------------- R2.2 — settlement order, running reconnect, binding --------
+def test_r22_overage_result_never_charges_ledger():
+    """A budget-overage result fails-closed WITHOUT charging the
+    controller ledger (verified numbers first, settlement last)."""
+    loop, client = make_loop()
+    advance_to_feedback(loop, client, token_cost=400)
+    sealed = client.get_evaluation_result(loop.job_id)
+
+    class Double(MockClientAdapter):
+        def get_evaluation_result(self, evaluation_id):
+            cost = dict(sealed["cost_metrics"], tokens=9000)
+            return _normalized_result(dict(sealed, cost_metrics=cost))
+
+    loop.client = Double(client._mock)
+    out = loop.complete_evaluation()
+    assert out["state"] == "TERMINATED"
+    assert "BUDGET_CAP_EXCEEDED" in out["reason"]
+    assert loop.tokens_spent == 0      # ledger NOT charged pre-validation
+
+
+def test_r22_adapter_usage_requires_verified_provenance():
+    """Both adapters refuse to settle on an unverified result
+    (fail-closed settlement basis)."""
+    loop, client, service = make_loopback_loop(
+        baseline_metrics=dict(BASELINE, answer_quality=0.40,
+                              token_cost=1200),
+        evaluator=loopback_evaluator(answer_f1=0.42))
+    run_loopback(loop, client)
+    record = service.records[loop.job_id]
+    record.result = dict(record.result, quality_metrics={"answer_f1": 0.99})
+    with pytest.raises(ClientError) as ei:
+        client.get_evaluation_usage(loop.job_id)
+    assert "PROVENANCE_VERIFICATION_FAILED" in str(ei.value)
+
+
+def test_r22_resume_reconnects_in_progress_evaluation():
+    """A restart while the workbench is STILL RUNNING reconnects: the
+    evaluation id is preserved and resume lands in
+    EVALUATION_REQUESTED (polling/consumption can continue)."""
+    loop, client = make_loop()
+    generate(loop)
+    loop.validate_candidate_step()
+    loop.request_evaluation()
+    snap = loop.seal_snapshot(loop.snapshot())
+
+    class RunningDouble(MockClientAdapter):
+        def get_evaluation_status(self, evaluation_id):
+            return "RUNNING"
+
+    fresh = RecursiveLoopControllerR2()
+    out = fresh.resume(snap, client=RunningDouble(client._mock))
+    assert out["state"] == "EVALUATION_REQUESTED"
+    assert fresh.job_id == snap["current_evaluation_id"]
+    # reconnect to the REAL adapter, then polling + consumption complete
+    fresh.client = client
+    client.deliver_result(fresh.job_id, dict(BASELINE, answer_quality=0.65))
+    assert fresh.poll_evaluation() == "COMPLETED"
+    assert fresh.complete_evaluation()["state"] == "EVALUATION_COMPLETED"
+
+
+def test_r22_resume_terminated_for_cancelled_evaluation():
+    loop, client = make_loop()
+    generate(loop)
+    loop.validate_candidate_step()
+    loop.request_evaluation()
+    client.deliver_result(loop.job_id, dict(BASELINE, answer_quality=0.65))
+    loop.poll_evaluation()
+    loop.cancel()                      # controller-side terminal snapshot
+    snap = loop.seal_snapshot(loop.snapshot())
+
+    double = make_double(client, get_evaluation_status=lambda self, _eid:
+                         "CANCELLED")
+    fresh = RecursiveLoopControllerR2()
+    out = fresh.resume(snap, client=double)
+    assert out["state"] == "TERMINATED"
+    assert fresh.stop_reason == "EVALUATION_CANCELLED"
+
+
+def test_r22_promotion_requires_candidate_digest_binding():
+    """A Decision Record from a DIFFERENT candidate can never propose
+    promotion (explicit digest binding, not just evaluation id)."""
+    loop, client = make_loop()
+    advance_to_feedback(loop, client, cid="cand-1-a", desc="x", token_cost=300)
+    loop.complete_evaluation()
+    loop.assess_feedback_step()
+    # simulate a state mixup: candidate swapped but decision record kept
+    loop.candidate["candidate_digest"] = "sha256:" + "f" * 64
+    r = loop.propose_promotion(rollback_plan="rb", residual_risks="rr")
+    assert r["promotion_blocked"] is True
+    assert "reward_cost_risk_pass" in r["failing_preconditions"]
 
 
 def test_r21_loopback_adapter_uses_official_surfaces_only():

@@ -97,6 +97,13 @@ def _canonical_digest(payload: dict) -> str:
     return hashlib.sha256(canonical_payload_bytes(payload)).hexdigest()
 
 
+def _verify_provenance(result_payload: dict) -> bool:
+    """Lazy-bound workbench provenance verifier (imported on first use so
+    the module does not hard-depend on the workbench tree at import)."""
+    from evaluation.candidate_evaluation import verify_provenance
+    return verify_provenance(result_payload)
+
+
 def _normalized_result(envelope: dict) -> dict:
     """Seal a canonical result envelope (self-excluding provenance, 64-hex)."""
     sealed = dict(envelope)
@@ -215,11 +222,17 @@ class MockClientAdapter(WorkbenchClientInterface):
 
     def get_evaluation_usage(self, evaluation_id: str) -> dict:
         if evaluation_id in self._sealed:
-            cost = self._sealed[evaluation_id]["cost_metrics"] or {}
+            sealed = self._sealed[evaluation_id]
         else:
-            res = self._mock.jobs.get(evaluation_id, {}).get("result")
-            cost = (res or {}).get("token_cost") and \
-                {"tokens": res["token_cost"]} or {}
+            try:
+                sealed = self._seal(evaluation_id,
+                                    self._mock.result(evaluation_id))
+            except PendingResult:   # not-ready evaluation: no usage yet
+                return {"tokens_used": 0, "model_calls_used": 0,
+                        "settlement_basis": "actual_usage"}
+        if not _verify_provenance(sealed):   # fail-closed settlement basis
+            raise ClientError("PROVENANCE_VERIFICATION_FAILED", evaluation_id)
+        cost = sealed["cost_metrics"] or {}
         return {"tokens_used": cost.get("tokens", 0),
                 "model_calls_used": cost.get("model_calls", 0),
                 "settlement_basis": "actual_usage"}
@@ -278,11 +291,15 @@ class LoopbackClientAdapter(WorkbenchClientInterface):
 
     def get_evaluation_usage(self, evaluation_id: str) -> dict:
         """Trusted usage — OFFICIAL surfaces only: settle-budget response +
-        token usage from the provenance-verified canonical result."""
+        token usage from the canonical result, whose provenance is
+        VERIFIED HERE (fail-closed: unverified results are never a
+        settlement basis)."""
         settle = self._request(
             "POST", f"/v1/evaluations/{evaluation_id}/settle-budget")["body"]
-        tokens = ((self.get_evaluation_result(evaluation_id)
-                   .get("cost_metrics") or {}).get("tokens", 0))
+        result = self.get_evaluation_result(evaluation_id)
+        if not _verify_provenance(result):
+            raise ClientError("PROVENANCE_VERIFICATION_FAILED", evaluation_id)
+        tokens = (result.get("cost_metrics") or {}).get("tokens", 0)
         return {"tokens_used": tokens,
                 "model_calls_used": settle["model_calls_used"],
                 "settlement_basis": settle["settlement_basis"]}
@@ -413,8 +430,11 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
         if boundary not in ("development", "validation", "held_out"):
             return self._fail_closed("DATA_BOUNDARY_UNKNOWN")
         tokens = (res.get("cost_metrics") or {}).get("tokens", 0)  # 10 usage
-        if not self.validated_result:                     # settle ONCE
-            self.tokens_spent += tokens
+        # budget cap is verified BEFORE any ledger change — an overage
+        # result never charges the controller (the workbench ledger holds
+        # the authoritative usage)
+        if self.approved_budget_tokens and tokens > self.approved_budget_tokens:
+            return self._fail_closed("BUDGET_CAP_EXCEEDED")
         # 11 reward/cost/risk axis mapping (10-condition validator re-run;
         # guaranteed to pass — every condition already held above)
         try:
@@ -425,6 +445,10 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
         except ContractRejected as exc:
             return self._fail_closed(
                 "RESULT_REJECTED:" + str(exc).split(";")[0].split(":")[0])
+        # settle ONLY a FULLY validated result (verified numbers first,
+        # ledger change last; settlement happens exactly once)
+        if not self.validated_result:
+            self.tokens_spent += tokens
         self.validated_result = {                         # immutable record
             "evaluation_id": res["evaluation_id"],
             "candidate_digest": self.candidate["candidate_digest"],
@@ -478,7 +502,9 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
                                      not decision_tampered and
                                      last_decision["decision"] == "ADVANCE"
                                      and last_decision["evaluation_id"] ==
-                                     self.job_id,
+                                     self.job_id and
+                                     last_decision["candidate_digest"] ==
+                                     self.candidate["candidate_digest"],
             "decision_record_integrity": bool(last_decision) and
                                          not decision_tampered,
             "evidence_present": bool(self.decision_records),
@@ -617,20 +643,33 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
             raise ContractRejected(";".join(problems))
         # ---- verification on LOCAL copies (nothing committed yet) ----
         local_tokens = snap["budget_ledger"]["tokens_spent"]
+        restore = {"state": snap["state"], "stop_reason":
+                   snap.get("stop_reason")}
         if snap.get("current_evaluation_id"):
             evaluation_id = snap["current_evaluation_id"]
             status = client.get_evaluation_status(evaluation_id)  # 6 status
-            if status != "COMPLETED":
+            if status == "RUNNING":
+                # in-progress evaluation RECONNECT: the evaluation id is
+                # preserved, no result exists yet — resume into
+                # EVALUATION_REQUESTED so polling/consumption can continue
+                restore = {"state": "EVALUATION_REQUESTED", "stop_reason":
+                           None}
+            elif status == "CANCELLED":
+                # cancelled evaluation: restore into a terminal state
+                restore = {"state": "TERMINATED", "stop_reason":
+                           "EVALUATION_CANCELLED"}
+            elif status == "COMPLETED":
+                try:                                      # 7 identity re-verify
+                    res = client.get_evaluation_result(evaluation_id)
+                    from_workbench_result_r2(
+                        res, candidate=snap.get("current_candidate") or {},
+                        baseline_wire=snap["baseline_wire"])
+                except (ClientError, ContractRejected) as exc:
+                    raise ContractRejected(
+                        "WORKBENCH_RESULT_IDENTITY_MISMATCH:" + str(exc))
+            else:
                 raise ContractRejected("WORKBENCH_EVALUATION_STATE_MISMATCH:"
                                        + status)
-            try:                                          # 7 identity re-verify
-                res = client.get_evaluation_result(evaluation_id)
-                from_workbench_result_r2(
-                    res, candidate=snap.get("current_candidate") or {},
-                    baseline_wire=snap["baseline_wire"])
-            except (ClientError, ContractRejected) as exc:
-                raise ContractRejected(
-                    "WORKBENCH_RESULT_IDENTITY_MISMATCH:" + str(exc))
             # 8+9 usage: SUM the trusted per-evaluation usage over the FULL
             # evaluation history — never compare cumulative ledger against
             # a single evaluation's usage
@@ -659,7 +698,8 @@ class RecursiveLoopControllerR2(RecursiveLoopController):
         self.history = list(snap["candidate_history"])
         self.evaluation_history = list(snap["evaluation_history"])
         self.best_quality = snap.get("best_candidate_quality")
-        self.stop_reason = snap.get("stop_reason")
+        self.state = restore["state"]
+        self.stop_reason = restore["stop_reason"]
         return {"resumed": True, "state": self.state}
 
     def cancel(self, reason: str = "EXPLICIT_CANCELLATION") -> dict:

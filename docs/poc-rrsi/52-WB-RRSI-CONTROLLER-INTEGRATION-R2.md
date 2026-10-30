@@ -204,3 +204,60 @@ commit 블록에서 한 번에 복원. 실패한 resume은 controller 상태를
 - 동일 6개 E2E 시나리오 + 다중 평가 resume 시나리오 재실행 PASS.
 
 **R2.1 최종 상태: `CONTROLLER_CLOSED_LOOP_VERIFIED`** (강화 근거)
+
+---
+
+## R2.2 — Settlement Order, Running Reconnect & Candidate Binding (검토 의견 보완)
+
+독립 검토(`R2.1_ACCEPTED_WITH_P0_REMAINING`)의 잔여 결함 3종 수정:
+
+### P0 — 검증 실패 시 예산 선차각 → 정산 순서 수정
+
+기존 `complete_evaluation()`은 `tokens_spent += tokens`가 step-11
+전체 검증기보다 먼저 실행 → 예산 초과 결과(`BUDGET_CAP_EXCEEDED`)가
+ledger를 선차각하고 실패. 수정:
+
+- **10단계에서 예산 상한 선검증** (상한 초과 → 즉시 fail-closed,
+  ledger 변경 0).
+- **정산을 step-11 전체 검증 이후로 이동** — 검증된 수치만 ledger에
+  반영, 정산은 정확히 1회.
+- 어댑터 양쪽(`LoopbackClientAdapter` · `MockClientAdapter`)의
+  `get_evaluation_usage()`이 **자체적으로 provenance 검증 강제**
+  (검증 실패 → `PROVENANCE_VERIFICATION_FAILED` ClientError) —
+  신뢰되지 않은 결과는 결코 정산 기준이 아님. 테스트: 초과 결과 →
+  TERMINATED + `tokens_spent == 0`; 변조 service 기록 → ClientError.
+
+### P0 — 진행 중 평가의 Durable Resume → 재연결 도입
+
+기존 `resume()`은 evaluation id가 있으면 Workbench 상태가 반드시
+`COMPLETED`여야 함 → 평가 요청 직후 재시작 시 복원 거부. 수정 —
+상태별 구분 처리 (원자성 유지, 검증은 지역 사본):
+
+| Workbench 상태 | Resume 처리 |
+|---|---|
+| RUNNING | **재연결**: evaluation id 보존, `EVALUATION_REQUESTED`로 복원 — 이후 poll·소비 정상 계속 |
+| COMPLETED | 결과 identity 재검증 후 복원 (기존 경로) |
+| CANCELLED | 종료 처리: `TERMINATED` + `stop_reason=EVALUATION_CANCELLED` 복원 |
+| 그 외/오류 | `WORKBENCH_EVALUATION_STATE_MISMATCH` 거부 (fail-closed) |
+
+테스트: RUNNING 재연결 후 `deliver_result → poll → complete` 정상
+완료; CANCELLED → TERMINATED 복원; 알 수 없는 상태 → 거부.
+
+### P1 — Promotion Candidate 결합 강화
+
+`reward_cost_risk_pass`가 Decision Record의 `candidate_digest`를
+**현재 candidate digest와 직접 비교** (기존은 evaluation id만) —
+candidate 교체·상태 오용 상태에서 promotion 차단. 테스트: digest
+불일치 → `promotion_blocked`.
+
+### R2.2 회귀
+
+- RRSI: **261/261 PASS** (R2.2 신규 5: 초과 결과 미차각 · 어댑터
+  provenance 강제 · RUNNING 재연결 · CANCELLED 종료 · candidate 결합)
+- Workbench: **114/114 PASS** (변경 0, `dfabe70` 유지)
+- 동일 6개 E2E 시나리오 + 다중 평가 resume 재실행 PASS.
+
+**R2.2 최종 상태: `CONTROLLER_CLOSED_LOOP_VERIFIED`**
+
+다음 단계(검토 권고 반영): Mock 통합 반복 종료 — Researcher Task
+REST API와 연결하는 실제 평가 단계로 진행 (Owner 승인 필요).
